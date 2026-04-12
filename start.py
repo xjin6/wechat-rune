@@ -135,16 +135,87 @@ def main():
 
     api_key = get_api_key()
 
-    print(f"\n✅ 准备监听 {len(watch_ids)} 个对话，启动中...\n")
-
-    # 启动 bot
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = api_key
     env["WECHAT_MY_WXID"] = wxid
     env["WECHAT_DB_PATH"] = db_path
     env["WECHAT_WATCH_IDS"] = ",".join(watch_ids)
 
+    # 先向量化（完成后再启动 bot）
+    _auto_vectorize(watch_ids, db_path, keys, env)
+
+    print(f"\n✅ 准备监听 {len(watch_ids)} 个对话，启动中...\n")
     os.execve(sys.executable, [sys.executable, "-u", "bot.py"], env)
+
+
+def _auto_vectorize(watch_ids: list, db_path: str, keys: dict, env: dict):
+    """启动前向量化每个监听对话的历史消息（按 local_id 对比，只补缺失的）"""
+    for k, v in env.items():
+        os.environ[k] = v
+
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(__file__))
+    from core.decrypt import query
+    from core.reader import extract_text
+    from core.embeddings import store, count, VECTOR_DB
+    from core.contacts import preload_from_messages, get_name
+    from core.ai import _extract_sender_wxid
+    from config import MAX_HISTORY
+    import sqlite3 as _sq
+
+    for wid in watch_ids:
+        table = "Msg_" + hashlib.md5(wid.encode()).hexdigest()
+
+        try:
+            total_rows = query(f"SELECT COUNT(*) FROM {table} WHERE local_type=1;")
+            total = int(total_rows[0][0]) if total_rows and total_rows[0][0] else 0
+        except Exception:
+            continue
+
+        # 已向量化的 local_id 集合
+        try:
+            vconn = _sq.connect(VECTOR_DB)
+            existing_ids = set(
+                r[0] for r in vconn.execute(
+                    "SELECT local_id FROM message_vectors WHERE table_name=?", (table,)
+                ).fetchall()
+            )
+            vconn.close()
+        except Exception:
+            existing_ids = set()
+
+        rows = query(
+            f"SELECT local_id, create_time, real_sender_id, hex(message_content) "
+            f"FROM {table} WHERE local_type=1 "
+            f"ORDER BY create_time DESC LIMIT 5000 OFFSET {MAX_HISTORY};"
+        )
+        missing = []
+        for r in rows:
+            try:
+                if int(r[0]) not in existing_ids:
+                    missing.append(r)
+            except (ValueError, IndexError):
+                pass
+
+        if not missing:
+            print(f"  ✓ {wid[:30]} 向量库已是最新（{len(existing_ids)} 条），跳过")
+            continue
+
+        print(f"  🔄 {wid[:30]} 新增向量化 {len(missing)} 条...")
+        preload_from_messages(table)
+        done = 0
+        for r in missing:
+            try:
+                text = extract_text(r[3])
+                if not text or text.startswith("<") or len(text.strip()) < 3:
+                    continue
+                wxid_sender = _extract_sender_wxid(r[3])
+                sender = get_name(wxid_sender) if wxid_sender else ("我" if int(r[2]) == 1 else "?")
+                store(table, int(r[0]), text, sender, int(r[1]))
+                done += 1
+            except Exception:
+                pass
+        print(f"  ✅ {wid[:30]} 完成（新增 {done} 条，共 {len(existing_ids)+done} 条）")
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ def handle_message(msg: tuple, history: list, table: str = None):
         print(f"[timing] 开始生成回复...", flush=True)
         import re as _re
         from config import MY_WXID
-        ai_text = generate(history, text, table=table, my_wxid=MY_WXID)
+        ai_text = generate(history, text, table=table, my_wxid=MY_WXID, chat_wxid=next((wid for wid, t in zip(WATCH_IDS, WATCH_TABLES) if t==table), None))
         print(f"[timing] Claude耗时: {_t.time()-t0:.2f}s | raw: {repr(ai_text[:20])}", flush=True)
         # 删掉Claude开头可能自带的所有👾和空白
         ai_text = _re.sub(r'^[\s\U0001F47E]+', '', ai_text)
@@ -138,6 +138,18 @@ def main():
                         last_ids[table] = max(m[0] for m in new_msgs)
 
                 for msg in new_msgs:
+                    # 如果 deque 已满，最老那条即将被挤出 → 后台向量化
+                    if len(history_cache[table]) >= MAX_HISTORY:
+                        oldest = history_cache[table][0]
+                        from core.embeddings import store as embed_store
+                        from core.reader import extract_text as _et
+                        from core.contacts import get_name as _gn
+                        from core.ai import _extract_sender_wxid
+                        old_text = _et(oldest[3])
+                        old_wxid = _extract_sender_wxid(oldest[3])
+                        old_sender = _gn(old_wxid) if old_wxid else ("我" if oldest[2] == 1 else "?")
+                        executor.submit(embed_store, table, oldest[0], old_text, old_sender, oldest[1])
+
                     # 追加到内存缓存（不管是否触发都记录）
                     history_cache[table].append(msg)
 

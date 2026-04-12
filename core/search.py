@@ -104,7 +104,7 @@ def search_messages(table: str, person_wxid: str = None,
         if person_wxid:
             raw = decode_raw(msg[3])
             sender_in_content = raw.split("\n")[0].rstrip(":") if "\n" in raw else ""
-            if sender_in_content != person_wxid and msg[2] == 1 and person_wxid != "magicxinjx":
+            if sender_in_content != person_wxid and msg[2] == 1:
                 continue
             if sender_in_content and sender_in_content != person_wxid:
                 continue
@@ -118,6 +118,26 @@ def search_messages(table: str, person_wxid: str = None,
             break
 
     return list(reversed(results))  # 时间正序
+
+
+def fetch_context(table: str, local_id: int, window: int = 5) -> list[tuple]:
+    """拉取某条消息前后 window 条，提供对话上下文"""
+    rows = query(
+        f"SELECT local_id, create_time, real_sender_id, "
+        f"hex(message_content), hex(source) "
+        f"FROM {table} WHERE local_type = 1 "
+        f"AND local_id BETWEEN {local_id - window} AND {local_id + window} "
+        f"ORDER BY create_time ASC;"
+    )
+    result = []
+    for r in rows:
+        if len(r) < 5:
+            continue
+        try:
+            result.append((int(r[0]), int(r[1]), int(r[2]), r[3], r[4]))
+        except Exception:
+            pass
+    return result
 
 
 def format_search_results(msgs: list[tuple], my_wxid: str) -> str:

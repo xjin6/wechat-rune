@@ -1,5 +1,5 @@
 """Claude AI 回复生成（含 RAG 历史搜索）"""
-import json, re
+import json, re, time
 import anthropic
 from config import ANTHROPIC_API_KEY, AI_MODEL, AI_SYSTEM_PROMPT, AI_MAX_TOKENS
 from core.contacts import get_name
@@ -30,8 +30,13 @@ def _extract_sender_wxid(hex_content: str) -> str:
 _NEEDS_SEARCH_RULES = [
     r"上(周|个月|次|回|星期)", r"last\s*(week|month)", r"之前", r"刚才以外",
     r"(说了|提到|聊过|讨论过).*什么", r"历史", r"记录", r"那时候", r"当时",
-    r"\d+月\d+[号日]",   # 具体日期：4月1号、3月15日
-    r"\d+[/-]\d+",       # 4/1、4-1 格式
+    r"\d+月\d+[号日]", r"\d+[/-]\d+",          # 具体日期
+    r"有(没有|无|过)(说|提|聊|讲|谈|讨论)",    # 有没有说/有无提到
+    r"(曾经|曾|是否|有否)(说|提|聊|讲|谈)",    # 曾经说过/是否提到
+    r"(说过|提过|聊过|讨论过|谈过)",             # 说过/提过
+    r"任何.*关于", r"关于.*的.*事",              # 关于xxx的事
+    r".+是谁", r".+是什么", r".+怎么了",        # 追问类：xxx是谁/是什么
+    r"(他|她|它|那个|这个).*(是|在|做|说|去)",  # 代词追问
 ]
 
 def _needs_search_heuristic(text: str) -> bool:
@@ -75,63 +80,11 @@ def generate(history: list, trigger_text: str,
     from config import REPLY_PREFIX, MY_WXID
     my_wxid = my_wxid or MY_WXID
 
-    # ── RAG：规则直接触发历史搜索 ────────────────────────────────
+    # ── RAG ──────────────────────────────────────────────────────
     extra_context = ""
     if table and _needs_search_heuristic(trigger_text):
-        from core.search import search_messages, format_search_results, parse_days
-        from core.contacts import _cache as contact_cache
-        from core.search import TIME_RANGES
-
-        # 去掉触发词前缀
-        clean = trigger_text
-        for prefix in ["/xin ", "小昕", "@小昕"]:
-            if clean.startswith(prefix):
-                clean = clean[len(prefix):].strip()
-                break
-
-        # 从文本里提取时间范围
-        days = 30
-        for k, v in TIME_RANGES.items():
-            if k in clean:
-                days = v
-                break
-
-        # 从文本里提取人名：试所有2-5字子串，找到联系人就停
-        from core.contacts import find_wxid
-        person_wxid = None
-        for length in range(2, 6):
-            if person_wxid:
-                break
-            for i in range(len(clean) - length + 1):
-                substr = clean[i:i+length]
-                if not re.search(r'[\u4e00-\u9fff\w]', substr):
-                    continue
-                wxid = find_wxid(substr)
-                if wxid:
-                    person_wxid = wxid
-                    break
-
-        # 提取关键词（去掉人名、时间词、助词后剩下的实词）
-        keyword = None
-        for stop in list(TIME_RANGES.keys()) + ["说了", "说过", "提到", "聊过", "讨论", "什么", "说的", "怎么说"]:
-            clean = clean.replace(stop, " ")
-        # 去掉已识别的人名
-        if person_wxid and person_wxid in contact_cache:
-            for part in re.split(r'[（(）)]', contact_cache[person_wxid]):
-                clean = clean.replace(part, " ")
-        keyword_parts = [w for w in clean.split() if len(w) > 1]
-        if keyword_parts:
-            keyword = keyword_parts[0]
-
-        from core.search import parse_date_range
-        date_range = parse_date_range(trigger_text)
-        if date_range:
-            found = search_messages(table, person_wxid, keyword, date_range=date_range)
-        else:
-            found = search_messages(table, person_wxid, keyword, days)
-        if found:
-            extra_context = format_search_results(found, my_wxid)
-            print(f"[RAG] 找到 {len(found)} 条历史消息", flush=True)
+        from core.rag import retrieve
+        extra_context = retrieve(trigger_text, table, MY_WXID, history=history, client=client, chat_wxid=kwargs.get("chat_wxid"))
 
     # 构建对话历史，带发送者名字
     raw = []
