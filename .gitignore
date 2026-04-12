@@ -1,6 +1,7 @@
 # 敏感文件
 keys/wechat_keys.json
 db/
+.env
 
 # Python
 __pycache__/

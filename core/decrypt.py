@@ -9,7 +9,8 @@ def get_key() -> str:
     global _key
     if _key is None:
         keys = json.load(open(KEYS_FILE))
-        _key = keys.get("magicxinjx_c092/db_storage/message/message_0.db", "")
+        # Find the key for message_0.db regardless of wxid path prefix
+        _key = next((v for k, v in keys.items() if "message/message_0.db" in k), "")
     return _key
 
 

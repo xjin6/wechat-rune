@@ -1,98 +1,149 @@
 # wechat-ai-bot
 
-在微信 Mac 客户端上运行的 AI 助手，监听指定对话，检测触发词后调用 Claude API 生成回复，通过 AppleScript 发送。
+A WeChat Mac desktop bot powered by Claude AI. It monitors specified conversations, detects trigger words, and replies automatically — all through local SQLite access and AppleScript, with no unofficial WeChat protocols.
 
-## 工作原理
+> **macOS only.** Requires WeChat Mac desktop client.
+
+---
+
+## How It Works
 
 ```
-微信写入消息 → FSEvents 检测 DB 变化 → sqlcipher 查新消息
-→ 触发词匹配 → Claude API 生成回复 → AppleScript 发送
+WeChat writes message → FSEvents detects DB change → SQLCipher queries encrypted DB
+→ trigger word match → Claude API generates reply → AppleScript sends it
 ```
 
-- **消息读取**：直接查询微信加密 SQLite 数据库（SQLCipher），无需解密整个 DB
-- **历史上下文**：每个对话独立维护一个内存 deque（50条），互不串台
-- **联系人识别**：按需查询 contact.db，备注和昵称双标识（如 `叶倩颖(chain)`）
-- **发送**：AppleScript 控制微信 Mac 客户端输入框
+- **Message detection**: FSEvents watches WeChat's SQLite WAL file for near-instant detection
+- **DB access**: Queries the encrypted SQLite database directly via SQLCipher (no full decryption)
+- **Memory**: Each conversation has its own in-memory deque (configurable history window), no cross-chat contamination
+- **Contact identification**: On-demand lookup from `contact.db`, displays both remark and nickname (e.g. `Alice(chain)`)
+- **Sending**: AppleScript controls the WeChat Mac input field
 
-## 目录结构
+---
+
+## Prerequisites
+
+```bash
+# SQLCipher for reading the encrypted WeChat DB
+brew install sqlcipher
+
+# Python dependencies
+python3 -m pip install anthropic watchdog zstandard
+```
+
+**Permissions required:**
+- macOS Accessibility access for Terminal (System Settings → Privacy & Security → Accessibility)
+
+---
+
+## Setup
+
+### 1. Extract the database encryption key
+
+WeChat's local SQLite databases are encrypted. You need to extract the key once.
+
+**Step 1** — Re-sign WeChat to allow LLDB attachment:
+```bash
+sudo codesign --force --deep --sign - /Applications/WeChat.app
+```
+
+**Step 2** — With WeChat running and logged in, run:
+```bash
+cd keys
+lldb -p $(pgrep -x WeChat) -o "script exec(open('extract_key2.py').read())" -o "quit"
+```
+
+Keys are saved to `keys/wechat_keys.json`.
+
+**Step 3** — Restore WeChat's original signature by reinstalling from the App Store.
+
+> The key stays valid across restarts and minor WeChat updates. Re-extract after major version updates or account changes.
+
+### 2. Find your configuration values
+
+**Your wxid**: Look at the path of the extracted key file — the folder name before `_c092` is your wxid.
+
+**Conversation IDs**: Open WeChat, go to the chat you want to monitor. The chat's internal ID can be found in the database. Group IDs end with `@chatroom`, personal chats use `wxid_xxxxxxxxxx`.
+
+**Database path**: After extracting the key, the path shown in `wechat_keys.json` contains your wxid and the path suffix.
+
+### 3. Configure environment variables
+
+```bash
+cp .env.example .env
+# Edit .env with your actual values
+source .env
+```
+
+### 4. Run
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... python3 bot.py
+```
+
+---
+
+## Trigger Rules
+
+| Sender | Trigger |
+|--------|---------|
+| Yourself | Message contains `/xin` (or your configured self-trigger) |
+| Others | Message contains any word in `BOT_TRIGGERS`, or @-mentions you |
+| Bot replies | Never contains `/xin` (prevents self-triggering loop) |
+
+---
+
+## Configuration Reference
+
+All settings are via environment variables (see `.env.example`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | — | **Required.** Your Anthropic API key |
+| `WECHAT_MY_WXID` | — | **Required.** Your WeChat internal user ID |
+| `WECHAT_WATCH_IDS` | — | **Required.** Comma-separated list of chat IDs to monitor |
+| `WECHAT_DB_PATH` | auto | Path to WeChat's `message_0.db` |
+| `BOT_TRIGGERS` | `小昕,/xin` | Trigger words (comma-separated) |
+| `AI_MODEL` | `claude-haiku-4-5-20251001` | Claude model to use |
+| `AI_MAX_TOKENS` | `1500` | Max tokens per reply |
+| `REPLY_PREFIX` | `👾 ` | Prefix added to every bot reply |
+| `MAX_HISTORY` | `50` | Number of messages kept per conversation |
+
+---
+
+## Project Structure
 
 ```
 wechat-ai-bot/
-├── bot.py          # 主入口
-├── config.py       # 所有配置（改这里）
+├── bot.py              # Main entry point
+├── config.py           # Configuration (all via env vars)
 ├── core/
-│   ├── ai.py       # Claude API 调用
-│   ├── contacts.py # 联系人查询
-│   ├── decrypt.py  # 加密 DB 查询
-│   ├── reader.py   # 消息读取/解析
-│   └── sender.py   # AppleScript 发送
+│   ├── ai.py           # Claude API calls + history building
+│   ├── contacts.py     # On-demand contact name lookup
+│   ├── decrypt.py      # SQLCipher query wrapper
+│   ├── reader.py       # Message parsing and decoding
+│   └── sender.py       # AppleScript send + markdown stripping
 └── keys/
-    ├── wechat_keys.json   # 数据库解密 key（已提取）
-    ├── extract_key2.py    # 重新提取 key 用（WeChat 更新后）
-    └── extract_key.lldb   # LLDB 脚本
+    ├── extract_key2.py     # Key extraction script (run inside LLDB)
+    ├── extract_key.lldb    # LLDB automation script
+    └── wechat_keys.json    # Your extracted keys (gitignored, never commit)
 ```
 
-## 配置（config.py）
+---
 
-```python
-# 监听的对话（群ID 或个人 wxid）
-WATCH_IDS = [
-    "34422179829@chatroom",   # SSCI Team 群
-    "wxid_iq08s7oagntq12",    # 杨晨
-    "wxid_iv139ys0vn3412",    # HK
-]
+## Security Notes
 
-# 触发词
-BOT_TRIGGERS = ["小昕", "/xin"]
+- `keys/wechat_keys.json` is gitignored — never commit it
+- The decrypted DB cache (`db/`) is also gitignored
+- API keys are read from environment variables only
+- Re-signing WeChat is needed only once for key extraction, then restore the original signature
 
-# AI 设置
-AI_MODEL = "claude-haiku-4-5-20251001"
-AI_MAX_TOKENS = 1500
-MAX_HISTORY = 50   # 每个对话的历史窗口
-REPLY_PREFIX = "👾 "
-```
+---
 
-## 触发规则
+## Limitations
 
-| 发送者 | 触发条件 |
-|--------|---------|
-| 自己 | 消息含 `/xin` |
-| 其他人 | 消息含 `小昕`、`/xin` 或 @你 |
-| AI 回复 | 不含 `/xin`（防自触发循环）|
-
-## 启动
-
-```bash
-cd wechat-ai-bot
-ANTHROPIC_API_KEY=sk-ant-... python3.9 bot.py
-```
-
-微信 Mac 客户端需保持运行。
-
-## 依赖
-
-```bash
-brew install sqlcipher
-python3.9 -m pip install anthropic watchdog zstandard
-```
-
-## 解密 key 失效时（WeChat 大版本更新后）
-
-1. 重签名微信：
-   ```bash
-   sudo codesign --force --deep --sign - /Applications/WeChat.app
-   ```
-2. 确保微信已登录，运行提取脚本：
-   ```bash
-   cd keys
-   PYTHONPATH=$(lldb -P) python3.9 extract_key2.py
-   ```
-   key 保存到 `keys/wechat_keys.json`
-
-3. 恢复微信签名（重装即可）：从 App Store 重装微信
-
-## 注意
-
-- 需要 macOS 辅助功能权限（System Settings → Privacy → Accessibility → Terminal）
-- 微信 Mac 客户端需保持在前台或可访问状态（用于 AppleScript 发送）
-- key 通常在微信大版本更新或换账号时失效，小版本更新不影响
+- macOS only (uses FSEvents + AppleScript)
+- WeChat Mac desktop client must be running
+- Bot replies go to whichever WeChat chat window is currently open
+- History window is limited to the last N messages (configurable)
+- Key must be re-extracted after major WeChat version updates

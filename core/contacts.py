@@ -6,15 +6,21 @@ _cache: dict[str, str] = {}
 
 
 def _get_db() -> str:
-    return os.path.expanduser(
-        "~/Library/Containers/com.tencent.xinWeChat/Data/Documents"
-        "/xwechat_files/magicxinjx_c092/db_storage/contact/contact.db"
+    from config import WECHAT_DB_PATH
+    # contact.db is in the same db_storage folder as message_0.db
+    return WECHAT_DB_PATH.replace(
+        "/message/message_0.db", "/contact/contact.db"
     )
 
 
 def _get_key() -> str:
+    from config import MY_WXID
     keys = json.load(open(KEYS_FILE))
-    return keys.get("magicxinjx_c092/db_storage/contact/contact.db", "")
+    # Key path pattern: <wxid>_xxxx/db_storage/contact/contact.db
+    for k, v in keys.items():
+        if "contact/contact.db" in k:
+            return v
+    return ""
 
 
 def get_name(wxid: str) -> str:
