@@ -1,0 +1,16 @@
+# 敏感文件
+keys/wechat_keys.json
+db/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# macOS
+.DS_Store
+
+# 临时文件
+/tmp/
+*.log
