@@ -22,6 +22,9 @@ WATCH_TABLES = ["Msg_" + hashlib.md5(wid.encode()).hexdigest() for wid in WATCH_
 # 其他人发消息含这些词时触发；自己只能用 /xin 触发
 BOT_TRIGGERS = os.environ.get("BOT_TRIGGERS", "小昕,/xin").split(",")
 
+# ── 其他（先于 AI_SYSTEM_PROMPT 定义，因为 prompt 引用了 MAX_HISTORY）──
+MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "100"))
+
 # ── AI ───────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 AI_MODEL      = os.environ.get("AI_MODEL", "claude-haiku-4-5-20251001")
@@ -30,7 +33,7 @@ REPLY_PREFIX  = os.environ.get("REPLY_PREFIX", "👾 ")
 
 AI_SYSTEM_PROMPT = (
     "你是AI助手。"
-    "你能看到最近50条对话历史，充分利用上下文回答问题。"
+    f"你能看到最近{MAX_HISTORY}条对话历史，充分利用上下文回答问题。"
     "如果被问到某人说了什么，直接从历史中找并总结，不要说看不到记录。"
     "仔细观察对话历史中用户本人的说话风格：用词、句子长短、语气、中英混用程度，模仿这个风格回复。"
     "根据上下文判断场合，不要把自己定义成某个特定群的助手。"
@@ -55,5 +58,3 @@ WECHAT_DB_PATH = os.environ.get(
 )
 WECHAT_WAL_PATH = WECHAT_DB_PATH + "-wal"
 
-# ── 其他 ─────────────────────────────────────────────────────────
-MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "50"))

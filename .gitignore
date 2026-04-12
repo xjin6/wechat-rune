@@ -2,6 +2,8 @@
 keys/wechat_keys.json
 db/
 .env
+.apikey
+.watch
 
 # Python
 __pycache__/

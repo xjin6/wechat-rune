@@ -25,7 +25,7 @@ from core.reader import (
 
 from core.sender import send
 from core.ai import generate
-from core.contacts import preload, get_name
+from core.contacts import preload, preload_from_messages, get_name
 
 
 # ── 文件监听 ─────────────────────────────────────────────────────
@@ -53,14 +53,15 @@ def should_trigger(raw: str, sender_id: int, at_me: bool) -> bool:
 
 # ── 消息处理（线程池）────────────────────────────────────────────
 
-def handle_message(msg: tuple, history: list):
+def handle_message(msg: tuple, history: list, table: str = None):
     import time as _t
     t0 = _t.time()
     try:
         text = extract_text(msg[3])
         print(f"[timing] 开始生成回复...", flush=True)
         import re as _re
-        ai_text = generate(history, text)
+        from config import MY_WXID
+        ai_text = generate(history, text, table=table, my_wxid=MY_WXID)
         print(f"[timing] Claude耗时: {_t.time()-t0:.2f}s | raw: {repr(ai_text[:20])}", flush=True)
         # 删掉Claude开头可能自带的所有👾和空白
         ai_text = _re.sub(r'^[\s\U0001F47E]+', '', ai_text)
@@ -85,10 +86,14 @@ def main():
         print("[!] 缺少 ANTHROPIC_API_KEY")
         sys.exit(1)
 
-    print("[*] 初始化...")
-    # 预加载监听对话中的联系人（私聊对象）
+    print("[*] 初始化联系人...")
+    # 私聊对象直接加载
     preload([wid for wid in WATCH_IDS if '@chatroom' not in wid])
-    print(f"[*] 已预加载私聊联系人")
+    # 每个对话扫描最近500条消息，把里面出现过的人全部加载进缓存
+    for table in WATCH_TABLES:
+        preload_from_messages(table)
+    from core.contacts import _cache
+    print(f"[*] 已加载 {len(_cache)} 个联系人到缓存")
     # 初始化每个对话的：last_id、内存历史缓存、已提交集合
     last_ids:   dict[str, int]   = {}
     history_cache: dict[str, deque] = {}
@@ -156,7 +161,7 @@ def main():
                     print(f"[触发/{label}] {text[:50]}", flush=True)
 
                     history_snapshot = list(history_cache[table])
-                    executor.submit(handle_message, msg, history_snapshot)
+                    executor.submit(handle_message, msg, history_snapshot, table)
 
     except KeyboardInterrupt:
         print('\n[*] 停止')
