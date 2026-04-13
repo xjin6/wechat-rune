@@ -17,3 +17,4 @@ __pycache__/
 # 临时文件
 /tmp/
 *.log
+keys/find_all_keys_macos
