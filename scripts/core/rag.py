@@ -1,7 +1,7 @@
 """
-RAG 检索模块 - 统一入口
+RAG retrieval module - unified entry point
 
-信号提取 → 实体扩展（别名解析）→ 路由搜索 → 加上下文 → 返回 extra_context
+Signal extraction -> entity expansion (alias resolution) -> routed search -> add context -> return extra_context
 """
 
 import re, json
@@ -15,10 +15,10 @@ from core.ai import _extract_sender_wxid
 
 def _expand_entities(intent: str, history: list, client) -> tuple:
     """
-    用 Claude 从对话历史中：
-    1. 找出查询里人名/词语的别称（如 彭泰权 = winson）
-    2. 结合上一轮对话语境，提取这次查询的真实搜索词
-    返回 (aliases, context_terms)
+    Use Claude to analyze conversation history:
+    1. Find aliases for names/terms in the query (e.g. 彭泰权 = winson)
+    2. Combine previous conversation context to extract the real search terms for this query
+    Returns (aliases, context_terms)
     """
     if not history:
         return [], []
@@ -33,12 +33,12 @@ def _expand_entities(intent: str, history: list, client) -> tuple:
 
     history_text = "\n".join(lines)
     prompt = (
-        "最近对话记录：\n" + history_text + "\n\n"
-        "用户当前查询：" + intent + "\n\n"
-        "请完成两件事，只返回JSON：\n"
-        '{"aliases": ["人名别称含原词"], "context_terms": ["结合上轮语境的关键搜索词"]}\n\n'
-        "例如：上轮聊winson/彭泰权会议，这轮问'什么时候开会'，"
-        "context_terms应包含winson和开会相关词。没有则返回空数组。"
+        "Recent conversation log:\n" + history_text + "\n\n"
+        "Current user query: " + intent + "\n\n"
+        "Complete two tasks, return only JSON:\n"
+        '{"aliases": ["name aliases including the original"], "context_terms": ["key search terms derived from prior conversation context"]}\n\n'
+        "Example: if the previous round discussed a meeting with winson/彭泰权, and the current query is 'when is the meeting', "
+        "context_terms should include winson and meeting-related terms. Return empty arrays if none apply."
     )
     try:
         resp = client.messages.create(
@@ -53,17 +53,17 @@ def _expand_entities(intent: str, history: list, client) -> tuple:
             aliases = [str(a) for a in data.get("aliases", []) if a]
             ctx_terms = [str(a) for a in data.get("context_terms", []) if a]
             if aliases or ctx_terms:
-                print(f"[RAG-entity] 别名:{aliases} 上下文词:{ctx_terms}", flush=True)
+                print(f"[RAG-entity] aliases:{aliases} context_terms:{ctx_terms}", flush=True)
             return aliases, ctx_terms
     except Exception as e:
-        print(f"[RAG-entity] 扩展失败: {e}", flush=True)
+        print(f"[RAG-entity] Expansion failed: {e}", flush=True)
     return [], []
 
 _member_cache: dict[str, set] = {}
 
 
 def _extract_person(intent: str):
-    """从意图文本中提取人名，返回 (wxid_or_None, keyword_or_None, is_found)"""
+    """Extract a person's name from intent text, return (wxid_or_None, keyword_or_None, is_found)"""
     for length in range(2, 7):
         for i in range(len(intent) - length + 1):
             substr = intent[i:i+length]
@@ -82,18 +82,18 @@ def _extract_person(intent: str):
 
 def _is_chat_member(person_wxid: str, chat_wxid: str) -> bool:
     """
-    判断 person_wxid 是否是 chat_wxid 这个对话的成员。
-    群聊：查 chatroom_member 表
-    私聊：对方就是 chat_wxid 本身
+    Check whether person_wxid is a member of the chat_wxid conversation.
+    Group chat: query the chatroom_member table
+    Private chat: the other party is chat_wxid itself
     """
     if not person_wxid or not chat_wxid:
         return False
 
-    # 私聊：直接比较
+    # Private chat: direct comparison
     if "@chatroom" not in chat_wxid:
         return person_wxid == chat_wxid
 
-    # 群聊：查缓存，没有则从 contact.db 加载
+    # Group chat: check cache, load from contact.db if missing
     if chat_wxid not in _member_cache:
         _member_cache[chat_wxid] = _load_group_members(chat_wxid)
 
@@ -101,7 +101,7 @@ def _is_chat_member(person_wxid: str, chat_wxid: str) -> bool:
 
 
 def _load_group_members(chatroom_wxid: str) -> set:
-    """从 contact.db 的 chatroom_member 表加载群成员 wxid"""
+    """Load group member wxids from the chatroom_member table in contact.db"""
     import subprocess, json
     from config import KEYS_FILE, SQLCIPHER_BIN, WECHAT_DB_PATH
 
@@ -115,7 +115,7 @@ def _load_group_members(chatroom_wxid: str) -> set:
         f.write('PRAGMA key = "x\'%s\'";\n' % key)
         f.write('PRAGMA cipher_page_size = 4096;\n')
         f.write('.separator "|||"\n')
-        # room_id 对应 contact.id，先找群的 id
+        # room_id corresponds to contact.id; first find the group's id
         f.write(f"SELECT cm.member_id, c.username FROM chatroom_member cm "
                 f"JOIN contact c2 ON c2.id = cm.room_id AND c2.username = '{chatroom_wxid}' "
                 f"JOIN contact c ON c.id = cm.member_id;\n")
@@ -136,9 +136,9 @@ def _load_group_members(chatroom_wxid: str) -> set:
 
 def _is_about_person(intent: str, person_wxid: str) -> bool:
     """
-    判断查询是 ABOUT 某人（关于他/她被提及）还是 FROM 某人（他/她说了什么）
-    有"说了/提到/聊过"等动作动词紧跟在人名后 → FROM
-    否则 → ABOUT
+    Determine whether the query is ABOUT a person (they were mentioned) or FROM a person (what they said).
+    Action verbs like "said/mentioned/chatted" immediately following the person's name -> FROM
+    Otherwise -> ABOUT
     """
     action_verbs = ["说", "提", "聊", "讲", "谈", "发", "分享"]
     if person_wxid and person_wxid in contact_cache:
@@ -151,24 +151,24 @@ def _is_about_person(intent: str, person_wxid: str) -> bool:
                 after = intent[idx + len(part):]
                 if any(after.startswith(v) for v in action_verbs):
                     return False  # FROM
-    return True  # ABOUT（默认：找关于他的所有内容）
+    return True  # ABOUT (default: find all content about them)
 
 
 def _format_msg(m: tuple, my_wxid_val: str, mark: bool = False) -> str:
     t = _dt.datetime.fromtimestamp(m[1]).strftime("%m-%d %H:%M")
     wx = _extract_sender_wxid(m[3])
-    name = contact_cache.get(wx, "我" if m[2] == 1 else "?")
+    name = contact_cache.get(wx, "me" if m[2] == 1 else "?")
     text = extract_text(m[3])
     suffix = " ◀" if mark else ""
     return f"[{t}][{name}]: {text}{suffix}"
 
 
-# ── 主函数 ────────────────────────────────────────────────────────
+# ── Main function ─────────────────────────────────────────────────
 
 def retrieve(trigger_text: str, table: str, my_wxid: str,
              history: list = None, client=None, chat_wxid: str = None) -> str:
     """
-    根据查询意图自动路由搜索，返回拼好的 extra_context 字符串。
+    Automatically route search based on query intent, return the assembled extra_context string.
     """
     intent = trigger_text
     for p in ["/xin ", "小昕", "@小昕"]:
@@ -176,23 +176,23 @@ def retrieve(trigger_text: str, table: str, my_wxid: str,
             intent = intent[len(p):].strip()
             break
 
-    # ① 实体别名扩展（有 history 和 client 时才跑）
+    # Step 1: Entity alias expansion (only runs when history and client are available)
     aliases, ctx_terms = [], []
     if history and client:
         aliases, ctx_terms = _expand_entities(intent, history, client)
 
-    # ② 提取信号
-    date_range = parse_date_range(trigger_text)          # 具体日期："4月1号"
+    # Step 2: Extract signals
+    date_range = parse_date_range(trigger_text)          # specific date: "4月1号"
     time_days = next((v for k, v in TIME_RANGES.items() if k in intent), None)
     person_wxid, person_kw, _ = _extract_person(intent)
 
-    # 关键规则：这个人是不是当前对话的成员？
-    # 是成员 → FROM 过滤（找他说的）
-    # 不是成员 → 第三方提及 → 关键词/语义搜索
+    # Key rule: is this person a member of the current conversation?
+    # Member -> FROM filter (find what they said)
+    # Non-member -> third-party mention -> keyword/semantic search
     in_chat = _is_chat_member(person_wxid, chat_wxid or "") if person_wxid else False
     is_about = (not in_chat) or _is_about_person(intent, person_wxid)
 
-    # 用别名补充 person_kw
+    # Supplement person_kw with aliases
     if aliases and not person_wxid:
         person_kw = person_kw or aliases[0]
 
@@ -217,9 +217,9 @@ def retrieve(trigger_text: str, table: str, my_wxid: str,
                 lines.append(_format_msg(m, my_wxid))
         sections.append("\n".join(lines))
 
-    # ② 路径 A：具体日期
+    # Path A: Specific date
     if date_range:
-        label = _dt.datetime.fromtimestamp(date_range[0]).strftime("%m月%d日的消息")
+        label = _dt.datetime.fromtimestamp(date_range[0]).strftime("Messages from %m-%d")
         found = search_messages(
             table,
             person_wxid if person_wxid and not is_about else None,
@@ -227,9 +227,9 @@ def retrieve(trigger_text: str, table: str, my_wxid: str,
             date_range=date_range, limit=50
         )
         add_msgs(found, f"[{label}]", with_context=False)
-        print(f"[RAG-A] 日期查询{len(found)}条", flush=True)
+        print(f"[RAG-A] Date query: {len(found)} results", flush=True)
 
-    # ③ 路径 B：时间范围
+    # Path B: Time range
     elif time_days:
         found = search_messages(
             table,
@@ -237,11 +237,11 @@ def retrieve(trigger_text: str, table: str, my_wxid: str,
             person_kw if not person_wxid else None,
             days=time_days, limit=30
         )
-        add_msgs(found, f"[最近{time_days}天相关消息]", with_context=False)
-        print(f"[RAG-B] 时间范围{len(found)}条", flush=True)
+        add_msgs(found, f"[Related messages from the last {time_days} days]", with_context=False)
+        print(f"[RAG-B] Time range: {len(found)} results", flush=True)
 
-    # ④ 路径 D：关键词搜索
-    # 规则：此人不在当前对话 OR 没有匹配到联系人 → 做关键词搜索
+    # Path D: Keyword search
+    # Rule: person not in current chat OR no contact match -> do keyword search
     search_kws = list(dict.fromkeys(aliases + ctx_terms + ([person_kw] if person_kw else [])))
     if search_kws and (not in_chat or not person_wxid):
         all_kw_found = []
@@ -251,22 +251,22 @@ def retrieve(trigger_text: str, table: str, my_wxid: str,
                 if m[0] not in seen_ids:
                     all_kw_found.append(m)
         if all_kw_found:
-            add_msgs(all_kw_found, f'[含"{"/".join(search_kws)}"的消息]', with_context=True)
-        print(f"[RAG-D] 关键词{search_kws}找到{len(all_kw_found)}条", flush=True)
+            add_msgs(all_kw_found, f'[Messages containing "{"/".join(search_kws)}"]', with_context=True)
+        print(f"[RAG-D] Keywords {search_kws}: {len(all_kw_found)} results", flush=True)
 
-    # ⑤ 路径 C：语义搜索（有向量库时必跑）
+    # Path C: Semantic search (always runs when vector store is available)
     vec_count = count(table)
     if vec_count > 0:
         sem_query = intent + " " + " ".join(ctx_terms) if ctx_terms else intent
         sem_all = semantic_search(table, sem_query, top_k=20)
         sem_all = [r for r in sem_all if r["score"] > 0.45]
-        # FROM 模式：只保留该人的消息
+        # FROM mode: keep only messages from this person
         if person_wxid and not is_about:
             name_parts = re.split(r'[（(）)]', contact_cache.get(person_wxid, ""))
             sem_all = [r for r in sem_all if any(p and p in r["sender"] for p in name_parts)]
         sem_new = [r for r in sem_all if r["local_id"] not in seen_ids]
         if sem_new:
-            lines = ["[语义相关历史消息]"]
+            lines = ["[Semantically related historical messages]"]
             for r in sem_new:
                 if r["local_id"] in seen_ids:
                     continue
@@ -276,6 +276,6 @@ def retrieve(trigger_text: str, table: str, my_wxid: str,
                         seen_ids.add(c[0])
                         lines.append(_format_msg(c, my_wxid, mark=(c[0] == r["local_id"])))
             sections.append("\n".join(lines))
-        print(f"[RAG-C] 语义{len(sem_new)}条(库{vec_count})", flush=True)
+        print(f"[RAG-C] Semantic: {len(sem_new)} results (store: {vec_count})", flush=True)
 
     return "\n\n".join(sections)

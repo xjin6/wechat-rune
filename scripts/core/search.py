@@ -1,11 +1,11 @@
-"""历史消息搜索——用于 RAG 动态扩展 context"""
+"""Historical message search -- used for RAG dynamic context expansion"""
 import time
 from core.decrypt import query
 from core.reader import extract_text, decode_raw
 from core.contacts import get_name
 
 
-# ── 时间范围解析 ──────────────────────────────────────────────────
+# ── Time range parsing ────────────────────────────────────────────
 
 TIME_RANGES = {
     "今天": 1, "today": 1,
@@ -17,7 +17,7 @@ TIME_RANGES = {
 }
 
 def parse_days(time_str: str) -> int:
-    """把时间描述转成天数，找不到返回 30"""
+    """Convert a time description to number of days; defaults to 30 if not found"""
     if not time_str:
         return 30
     for k, v in TIME_RANGES.items():
@@ -27,11 +27,11 @@ def parse_days(time_str: str) -> int:
 
 
 def parse_date_range(text: str):
-    """从文本里提取具体日期，返回 (start_ts, end_ts) 或 None"""
+    """Extract a specific date from text, return (start_ts, end_ts) or None"""
     import re, datetime
     now = datetime.datetime.now()
 
-    # 匹配 "4月1号" / "4月1日"
+    # Match "4月1号" / "4月1日"
     m = re.search(r'(\d+)月(\d+)[号日]', text)
     if m:
         month, day = int(m.group(1)), int(m.group(2))
@@ -39,12 +39,12 @@ def parse_date_range(text: str):
         try:
             dt = datetime.datetime(year, month, day)
             start = int(dt.timestamp())
-            end = start + 86400  # 当天
+            end = start + 86400  # same day
             return start, end
         except ValueError:
             pass
 
-    # 匹配 "4/1" / "4-1"
+    # Match "4/1" / "4-1"
     m = re.search(r'(\d{1,2})[/-](\d{1,2})', text)
     if m:
         month, day = int(m.group(1)), int(m.group(2))
@@ -60,14 +60,14 @@ def parse_date_range(text: str):
     return None
 
 
-# ── 核心搜索 ──────────────────────────────────────────────────────
+# ── Core search ───────────────────────────────────────────────────
 
 def search_messages(table: str, person_wxid: str = None,
                     keyword: str = None, days: int = 30,
                     limit: int = 20, date_range=None) -> list[tuple]:
     """
-    在指定对话表里搜索历史消息。
-    返回格式与 deque 里的消息元组相同：
+    Search historical messages in the specified conversation table.
+    Returns tuples in the same format as the deque:
     (local_id, create_time, real_sender_id, hex_content, hex_source)
     """
     if date_range:
@@ -77,14 +77,14 @@ def search_messages(table: str, person_wxid: str = None,
         since_ts = int(time.time()) - days * 86400
         conditions = [f"local_type = 1", f"create_time >= {since_ts}"]
 
-    # 按关键词过滤（在 hex 内容里找很麻烦，先拉出来再过滤）
+    # Filter by keyword (searching inside hex content is cumbersome, so fetch first then filter)
     sql = (
         f"SELECT local_id, create_time, real_sender_id, "
         f"hex(message_content), hex(source) "
         f"FROM {table} "
         f"WHERE {' AND '.join(conditions)} "
         f"ORDER BY create_time DESC "
-        f"LIMIT {limit * 5};"  # 多拉一些，后面再过滤
+        f"LIMIT {limit * 5};"  # Fetch extra rows, filter afterwards
     )
     rows = query(sql)
     results = []
@@ -100,7 +100,7 @@ def search_messages(table: str, person_wxid: str = None,
         if not text or text.startswith("<"):
             continue
 
-        # 按发送者过滤
+        # Filter by sender
         if person_wxid:
             raw = decode_raw(msg[3])
             sender_in_content = raw.split("\n")[0].rstrip(":") if "\n" in raw else ""
@@ -109,7 +109,7 @@ def search_messages(table: str, person_wxid: str = None,
             if sender_in_content and sender_in_content != person_wxid:
                 continue
 
-        # 按关键词过滤
+        # Filter by keyword
         if keyword and keyword.lower() not in text.lower():
             continue
 
@@ -117,11 +117,11 @@ def search_messages(table: str, person_wxid: str = None,
         if len(results) >= limit:
             break
 
-    return list(reversed(results))  # 时间正序
+    return list(reversed(results))  # Chronological order
 
 
 def fetch_context(table: str, local_id: int, window: int = 5) -> list[tuple]:
-    """拉取某条消息前后 window 条，提供对话上下文"""
+    """Fetch messages around a given local_id (window before and after) for conversation context"""
     rows = query(
         f"SELECT local_id, create_time, real_sender_id, "
         f"hex(message_content), hex(source) "
@@ -141,10 +141,10 @@ def fetch_context(table: str, local_id: int, window: int = 5) -> list[tuple]:
 
 
 def format_search_results(msgs: list[tuple], my_wxid: str) -> str:
-    """把搜索结果格式化成文字，追加到 context"""
+    """Format search results as text to be appended to the context"""
     if not msgs:
         return ""
-    lines = ["[以下是从历史记录中检索到的相关消息]"]
+    lines = ["[The following are relevant messages retrieved from history]"]
     import datetime
     for msg in msgs:
         t = datetime.datetime.fromtimestamp(msg[1]).strftime("%m-%d %H:%M")
@@ -158,10 +158,10 @@ def format_search_results(msgs: list[tuple], my_wxid: str) -> str:
         if sender_wxid and sender_wxid != my_wxid:
             name = get_name(sender_wxid)
         elif msg[2] == 1:
-            name = "我"
+            name = "me"
         else:
-            name = "对方"
+            name = "other"
         text = extract_text(msg[3])
         lines.append(f"[{t}] [{name}]: {text}")
-    lines.append("[历史记录结束]")
+    lines.append("[End of historical records]")
     return "\n".join(lines)

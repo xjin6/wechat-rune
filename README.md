@@ -1,113 +1,119 @@
-# wechat-ai-bot
+[English](README.md) | [中文](README_CN.md)
 
-A WeChat Mac desktop bot powered by Claude AI. It monitors specified conversations, detects trigger words, and replies automatically — all through local SQLite access and AppleScript, with no unofficial WeChat protocols.
+# wechat-export-bot
+
+Export WeChat chat history to Markdown (with voice transcription), and optionally run an AI auto-reply bot — all from your Mac, fully local.
 
 > **macOS only.** Requires WeChat Mac desktop client.
 
 ---
 
+## Features
+
+### Chat Export
+- Export any private chat or group chat to clean Markdown
+- **16 message types** supported: text, images, voice, video, stickers, official accounts, mini programs, files, transfers, red packets, pat-pat, quotes (nested), calls, system messages
+- Voice messages automatically transcribed via Whisper (extracted directly from local DB, no network needed)
+- Homophone correction via LLM with invisible HTML annotations
+- Sender names displayed as WeChat nicknames
+- Deduplication via `server_id` (globally unique)
+
+### AI Bot
+- Monitors specified conversations for trigger words
+- Replies automatically via Claude API
+- Sends via AppleScript — no unofficial WeChat protocols
+- Per-conversation memory with configurable history window
+- RAG support with vector search for long-term context
+
+---
+
 ## How It Works
 
+**Chat Export:**
 ```
-WeChat writes message → FSEvents detects DB change → SQLCipher queries encrypted DB
-→ trigger word match → Claude API generates reply → AppleScript sends it
+Encrypted DB → SQLCipher decrypt → parse messages → format Markdown
+Voice: media_0.db BLOB → SILK decode → ffmpeg → Whisper → transcription
 ```
 
-- **Message detection**: FSEvents watches WeChat's SQLite WAL file for near-instant detection
-- **DB access**: Queries the encrypted SQLite database directly via SQLCipher (no full decryption)
-- **Memory**: Each conversation has its own in-memory deque (configurable history window), no cross-chat contamination
-- **Contact identification**: On-demand lookup from `contact.db`, displays both remark and nickname (e.g. `Alice(chain)`)
-- **Sending**: AppleScript controls the WeChat Mac input field
+**AI Bot:**
+```
+FSEvents detects DB change → SQLCipher query → trigger match → Claude API → AppleScript send
+```
 
 ---
 
-## Prerequisites
+## Quick Start
+
+### Prerequisites
 
 ```bash
-# SQLCipher for reading the encrypted WeChat DB
-brew install sqlcipher
+brew install sqlcipher ffmpeg
+pip install -r requirements.txt
 
-# Python dependencies
-python3 -m pip install anthropic watchdog zstandard
+# SILK decoder (for voice transcription)
+git clone https://github.com/kn007/silk-v3-decoder.git /tmp/silk-v3-decoder
+cd /tmp/silk-v3-decoder/silk && make
 ```
 
-**Permissions required:**
-- macOS Accessibility access for Terminal (System Settings → Privacy & Security → Accessibility)
+### 1. Extract encryption keys
 
----
+WeChat databases are encrypted. Extract keys once (re-extract after major updates):
 
-## Setup
-
-### 1. Extract the database encryption key
-
-WeChat's local SQLite databases are encrypted. You need to extract the key once.
-
-**Step 1** — Re-sign WeChat to allow LLDB attachment:
 ```bash
+# Re-sign WeChat to allow debugger
 sudo codesign --force --deep --sign - /Applications/WeChat.app
+
+# Extract (WeChat must be running)
+lldb -p $(pgrep -x WeChat) \
+     -o "script exec(open('scripts/keys/extract_key2.py').read())" \
+     -o "quit"
 ```
 
-**Step 2** — With WeChat running and logged in, run:
+### 2. Export chat history
+
 ```bash
-cd keys
-lldb -p $(pgrep -x WeChat) -o "script exec(open('extract_key2.py').read())" -o "quit"
+python3 scripts/export_chat.py --name "nickname"
 ```
 
-Keys are saved to `keys/wechat_keys.json`.
-
-**Step 3** — Restore WeChat's original signature by reinstalling from the App Store.
-
-> The key stays valid across restarts and minor WeChat updates. Re-extract after major version updates or account changes.
-
-### 2. Find your configuration values
-
-**Your wxid**: Look at the path of the extracted key file — the folder name before `_c092` is your wxid.
-
-**Conversation IDs**: Open WeChat, go to the chat you want to monitor. The chat's internal ID can be found in the database. Group IDs end with `@chatroom`, personal chats use `wxid_xxxxxxxxxx`.
-
-**Database path**: After extracting the key, the path shown in `wechat_keys.json` contains your wxid and the path suffix.
-
-### 3. Configure environment variables
+### 3. Transcribe voice messages (optional)
 
 ```bash
-cp .env.example .env
-# Edit .env with your actual values
-source .env
+python3 scripts/transcribe_voices.py --name "nickname"
+python3 scripts/export_chat.py --name "nickname" --voice-json name_voice_map.json
 ```
 
-### 4. Run
+### 4. Run AI bot (optional)
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... python3 bot.py
+# Configure
+echo "wxid_xxx" > .watch
+echo "sk-ant-xxx" > .apikey
+
+# Launch
+python3 scripts/start.py
 ```
 
 ---
 
-## Trigger Rules
+## Supported Message Types
 
-| Sender | Trigger |
-|--------|---------|
-| Yourself | Message contains `/xin` (or your configured self-trigger) |
-| Others | Message contains any word in `BOT_TRIGGERS`, or @-mentions you |
-| Bot replies | Never contains `/xin` (prevents self-triggering loop) |
-
----
-
-## Configuration Reference
-
-All settings are via environment variables (see `.env.example`):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | — | **Required.** Your Anthropic API key |
-| `WECHAT_MY_WXID` | — | **Required.** Your WeChat internal user ID |
-| `WECHAT_WATCH_IDS` | — | **Required.** Comma-separated list of chat IDs to monitor |
-| `WECHAT_DB_PATH` | auto | Path to WeChat's `message_0.db` |
-| `BOT_TRIGGERS` | `小昕,/xin` | Trigger words (comma-separated) |
-| `AI_MODEL` | `claude-haiku-4-5-20251001` | Claude model to use |
-| `AI_MAX_TOKENS` | `1500` | Max tokens per reply |
-| `REPLY_PREFIX` | `👾 ` | Prefix added to every bot reply |
-| `MAX_HISTORY` | `50` | Number of messages kept per conversation |
+| Type | Output |
+|------|--------|
+| Text | `hi你好。` |
+| Image | `[图片]` |
+| Voice | `[语音 9s] transcribed text` |
+| Video | `[视频 23s]` |
+| Sticker | `[表情包]` |
+| Official Account | `[公众号 \| Name] title` |
+| Mini Program | `[小程序 \| Name] title` |
+| File | `[文件] file.pdf` |
+| Chat Record | `[聊天记录] title` |
+| Transfer | `[转账 ¥0.68]` |
+| Red Packet | `[红包 note]` |
+| Pat-pat | `[互动] I tickled ...` |
+| Call | `[语音通话 120s]` |
+| Quote Reply | text + `> quoted` (nested) |
+| System | *italic* |
 
 ---
 
@@ -115,35 +121,35 @@ All settings are via environment variables (see `.env.example`):
 
 ```
 wechat-ai-bot/
-├── bot.py              # Main entry point
-├── config.py           # Configuration (all via env vars)
-├── core/
-│   ├── ai.py           # Claude API calls + history building
-│   ├── contacts.py     # On-demand contact name lookup
-│   ├── decrypt.py      # SQLCipher query wrapper
-│   ├── reader.py       # Message parsing and decoding
-│   └── sender.py       # AppleScript send + markdown stripping
-└── keys/
-    ├── extract_key2.py     # Key extraction script (run inside LLDB)
-    ├── extract_key.lldb    # LLDB automation script
-    └── wechat_keys.json    # Your extracted keys (gitignored, never commit)
+├── scripts/
+│   ├── export_chat.py          # Chat history → Markdown
+│   ├── transcribe_voices.py    # Voice → Whisper transcription
+│   ├── start.py                # Bot launcher
+│   ├── bot.py                  # Bot main process
+│   ├── config.py               # Configuration (env vars)
+│   ├── dashboard.py            # Web dashboard (localhost:7788)
+│   ├── keys/
+│   │   └── extract_key2.py     # LLDB key extraction
+│   └── core/                   # Internal modules (AI, contacts, RAG, etc.)
+├── SKILL.md                    # Claude Code skill definition
+├── requirements.txt
+└── .gitignore
 ```
 
 ---
 
-## Security Notes
+## Security
 
-- `keys/wechat_keys.json` is gitignored — never commit it
-- The decrypted DB cache (`db/`) is also gitignored
-- API keys are read from environment variables only
-- Re-signing WeChat is needed only once for key extraction, then restore the original signature
+- `keys/wechat_keys.json` — gitignored, never commit
+- Exported chat files — gitignored
+- API keys — environment variables only
+- Re-sign WeChat only for key extraction, restore afterward
 
 ---
 
 ## Limitations
 
-- macOS only (uses FSEvents + AppleScript)
-- WeChat Mac desktop client must be running
-- Bot replies go to whichever WeChat chat window is currently open
-- History window is limited to the last N messages (configurable)
-- Key must be re-extracted after major WeChat version updates
+- macOS only (FSEvents + AppleScript)
+- WeChat Mac client must be running
+- Keys must be re-extracted after major WeChat updates
+- Voice transcription requires ~2.8s per message (Whisper `small` model)

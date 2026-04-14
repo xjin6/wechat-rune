@@ -1,30 +1,30 @@
-"""通过 AppleScript 发送微信消息"""
+"""Send WeChat messages via AppleScript"""
 import subprocess, time, re, threading
 
-_send_lock = threading.Lock()  # 同一时刻只允许一个线程发送
+_send_lock = threading.Lock()  # Only one thread may send at a time
 
 
 def strip_blank_lines(text: str) -> str:
-    """把连续空行压缩成单换行"""
+    """Collapse consecutive blank lines into a single newline"""
     import re
     return re.sub(r'\n{2,}', '\n', text).strip()
 
 
 def strip_markdown(text: str) -> str:
-    """去掉微信不支持的markdown格式"""
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)   # **粗体**
-    text = re.sub(r'\*(.+?)\*', r'\1', text)         # *斜体*
-    text = re.sub(r'__(.+?)__', r'\1', text)         # __粗体__
-    text = re.sub(r'_(.+?)_', r'\1', text)           # _斜体_
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  # # 标题
-    text = re.sub(r'`(.+?)`', r'\1', text)           # `代码`
-    text = re.sub(r'```[\s\S]*?```', '', text)        # ```代码块```
-    text = text.replace('/xin', '')                   # 防止回复里含触发词
+    """Strip markdown formatting not supported by WeChat"""
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)   # **bold**
+    text = re.sub(r'\*(.+?)\*', r'\1', text)         # *italic*
+    text = re.sub(r'__(.+?)__', r'\1', text)         # __bold__
+    text = re.sub(r'_(.+?)_', r'\1', text)           # _italic_
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  # # headings
+    text = re.sub(r'`(.+?)`', r'\1', text)           # `inline code`
+    text = re.sub(r'```[\s\S]*?```', '', text)        # ```code blocks```
+    text = text.replace('/xin', '')                   # Prevent trigger word in replies
     return text.strip()
 
 
 def send(message: str) -> bool:
-    """将消息通过剪贴板粘贴到当前微信窗口并发送（串行，不并发）"""
+    """Paste message via clipboard into the current WeChat window and send (serial, not concurrent)"""
     with _send_lock:
         message = strip_markdown(message)
         message = strip_blank_lines(message)
@@ -47,7 +47,7 @@ end tell
 
 
 def navigate_to(chat_name: str):
-    """用 Cmd+F 搜索并切换到指定聊天"""
+    """Use Cmd+F to search and switch to the specified chat"""
     script = f'''
 tell application "WeChat"
     activate

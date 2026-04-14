@@ -1,0 +1,10 @@
+# Core: chat export & decryption
+zstandard
+
+# Voice transcription (Step 3, optional)
+openai-whisper
+
+# AI bot (Step 4, optional)
+anthropic
+watchdog
+sentence-transformers

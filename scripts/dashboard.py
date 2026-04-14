@@ -1,15 +1,17 @@
 """
-WeChat AI Bot Dashboard — 3秒轮询
+WeChat AI Bot Dashboard — 3-second polling
 python3.9 dashboard.py → http://localhost:7788
 """
 import os, sys, json, hashlib, sqlite3, subprocess, time, glob, tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+sys.path.insert(0, SCRIPT_DIR)
 
-WATCH_FILE = os.path.join(os.path.dirname(__file__), ".watch")
-VECTOR_DB  = os.path.join(os.path.dirname(__file__), "db", "vectors.db")
-KEYS_FILE  = os.path.join(os.path.dirname(__file__), "keys", "wechat_keys.json")
+WATCH_FILE = os.path.join(PROJECT_ROOT, ".watch")
+VECTOR_DB  = os.path.join(PROJECT_ROOT, "db", "vectors.db")
+KEYS_FILE  = os.path.join(SCRIPT_DIR, "keys", "wechat_keys.json")
 SQLCIPHER  = "/opt/homebrew/opt/sqlcipher/bin/sqlcipher"
 
 def _detect_db_path():
@@ -79,7 +81,7 @@ def _counts(wxid):
 
 def _resolve(name):
     if name.startswith("wxid_") or "@chatroom" in name:
-        # 群聊：尝试从 contact.db 获取群名
+        # Group chat: try to get group name from contact.db
         if "@chatroom" in name and _MSG_DB:
             try:
                 keys = json.load(open(KEYS_FILE))
@@ -122,13 +124,13 @@ def get_data():
 
 
 PAGE = r"""<!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>WeChat AI Bot</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,"PingFang SC",sans-serif;background:#f5f5f7;color:#1d1d1f;padding:32px 20px}
+body{font-family:-apple-system,sans-serif;background:#f5f5f7;color:#1d1d1f;padding:32px 20px}
 .wrap{max-width:660px;margin:0 auto}
 h1{font-size:24px;font-weight:700;margin-bottom:20px}
 .card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.07)}
@@ -161,24 +163,24 @@ h1{font-size:24px;font-weight:700;margin-bottom:20px}
   <div class="status">
     <div class="dot" id="dot"></div>
     <div>
-      <div class="st" id="bot-st">连接中...</div>
+      <div class="st" id="bot-st">Connecting...</div>
       <div class="sub" id="bot-sub">—</div>
     </div>
   </div>
 </div>
 
 <div class="card">
-  <div style="font-weight:600;margin-bottom:12px">监听中的对话 (<span id="n">—</span>)</div>
+  <div style="font-weight:600;margin-bottom:12px">Watched Conversations (<span id="n">—</span>)</div>
   <div id="convs"></div>
 </div>
 
-<div class="live"><div class="pulse"></div>实时更新中</div>
+<div class="live"><div class="pulse"></div>Live updating</div>
 </div>
 
 <script>
 function update(d) {
   document.getElementById('dot').style.background = d.bot ? '#30d158' : '#ff3b30';
-  document.getElementById('bot-st').textContent = d.bot ? '运行中' : '已停止';
+  document.getElementById('bot-st').textContent = d.bot ? 'Running' : 'Stopped';
   document.getElementById('bot-sub').textContent = d.bot ? 'PID: ' + d.pids : '—';
   document.getElementById('n').textContent = d.convs.length;
 
@@ -205,16 +207,16 @@ function update(d) {
     const done = pct >= 85;
     const color = done ? '#30d158' : (pct > 50 ? '#007aff' : '#ff9500');
     document.getElementById('fill-' + c.id).style.cssText = `width:${pct}%;background:${color}`;
-    document.getElementById('nums-' + c.id).textContent = `共 ${c.total} 条 · 历史 ${c.need} 条`;
-    document.getElementById('pct-' + c.id).textContent = `${Math.min(c.vec, c.need)}/${c.need} 已向量化`;
+    document.getElementById('nums-' + c.id).textContent = `${c.total} total · ${c.need} history`;
+    document.getElementById('pct-' + c.id).textContent = `${Math.min(c.vec, c.need)}/${c.need} vectorized`;
     const badge = document.getElementById('badge-' + c.id);
-    badge.textContent = done ? '✓ 完成' : pct + '%';
+    badge.textContent = done ? '✓ Done' : pct + '%';
     badge.className = 'badge ' + (done ? 'ok' : 'wip');
   });
 }
 function poll() {
   fetch('/api').then(r => r.json()).then(update).catch(() => {
-    document.getElementById('bot-st').textContent = 'Dashboard 连接断开';
+    document.getElementById('bot-st').textContent = 'Dashboard disconnected';
   });
 }
 poll();

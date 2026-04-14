@@ -1,4 +1,4 @@
-"""读取微信消息（直接查加密DB，历史从内存deque）"""
+"""Read WeChat messages (query encrypted DB directly, history from in-memory deque)"""
 import zstandard, xml.etree.ElementTree as ET, re
 from config import MY_WXID, MAX_HISTORY
 from core.decrypt import query
@@ -73,7 +73,7 @@ def get_new_messages(table: str, after_id: int) -> list[tuple]:
 
 
 def load_initial_history(table: str) -> list[tuple]:
-    """启动时填充deque用"""
+    """Load initial messages to populate the deque at startup"""
     rows = query(
         f'SELECT local_id, create_time, real_sender_id, '
         f'hex(message_content), hex(source) '

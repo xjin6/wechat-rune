@@ -1,6 +1,6 @@
 """
-向量化模块：用 sentence-transformers 把消息转成向量，存入本地 SQLite。
-支持语义搜索，作为关键词搜索的补充（RAG 长期记忆层）。
+Embedding module: convert messages to vectors using sentence-transformers and store them in local SQLite.
+Supports semantic search as a complement to keyword search (RAG long-term memory layer).
 """
 
 import os, sqlite3, json, time
@@ -16,10 +16,10 @@ _model = None
 def _get_model():
     global _model
     if _model is None:
-        print("[向量] 加载 embedding 模型...", flush=True)
+        print("[Embedding] Loading embedding model...", flush=True)
         from sentence_transformers import SentenceTransformer
         _model = SentenceTransformer(MODEL_NAME)
-        print("[向量] 模型加载完成", flush=True)
+        print("[Embedding] Model loaded", flush=True)
     return _model
 
 
@@ -42,14 +42,14 @@ def _get_db():
 
 
 def embed(text: str) -> np.ndarray:
-    """把文本转成向量"""
+    """Convert text to a vector"""
     model = _get_model()
     return model.encode(text, normalize_embeddings=True)
 
 
 def store(table: str, local_id: int, text: str,
           sender: str, create_time: int):
-    """把一条消息向量化并存入DB（后台调用，不影响主流程）"""
+    """Vectorize a message and store it in the DB (background call, does not block the main flow)"""
     try:
         if not text or text.startswith("<") or len(text.strip()) < 3:
             return
@@ -65,14 +65,14 @@ def store(table: str, local_id: int, text: str,
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"[向量] 存储失败: {e}", flush=True)
+        print(f"[Embedding] Storage failed: {e}", flush=True)
 
 
 def semantic_search(table: str, query: str,
                     top_k: int = 15,
                     since_ts: int = 0) -> list[dict]:
     """
-    语义搜索：返回最相似的消息列表，每条包含 text/sender/create_time/score。
+    Semantic search: return the most similar messages, each containing text/sender/create_time/score.
     """
     try:
         conn = _get_db()
@@ -96,7 +96,7 @@ def semantic_search(table: str, query: str,
         results = []
         for row in rows:
             vec = np.frombuffer(row[1], dtype=np.float32)
-            score = float(np.dot(query_vec, vec))  # 已归一化，点积=余弦相似度
+            score = float(np.dot(query_vec, vec))  # Already normalized; dot product = cosine similarity
             results.append({
                 "local_id":    row[0],
                 "text":        row[2],
@@ -109,12 +109,12 @@ def semantic_search(table: str, query: str,
         return results[:top_k]
 
     except Exception as e:
-        print(f"[向量] 搜索失败: {e}", flush=True)
+        print(f"[Embedding] Search failed: {e}", flush=True)
         return []
 
 
 def count(table: str) -> int:
-    """返回该对话已向量化的消息数"""
+    """Return the number of vectorized messages for this conversation"""
     try:
         conn = _get_db()
         r = conn.execute(

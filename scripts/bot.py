@@ -1,6 +1,6 @@
 """
-微信AI机器人 - 主入口
-用法：python3.9 bot.py
+WeChat AI Bot - main entry point
+Usage: python3.9 bot.py
 """
 
 import os, sys, time, traceback, threading
@@ -28,7 +28,7 @@ from core.ai import generate
 from core.contacts import preload, preload_from_messages, get_name
 
 
-# ── 文件监听 ─────────────────────────────────────────────────────
+# ── File watcher ─────────────────────────────────────────────────
 
 class DBWatcher(FileSystemEventHandler):
     def __init__(self, queue: Queue, db_name: str):
@@ -43,7 +43,7 @@ class DBWatcher(FileSystemEventHandler):
             self.queue.put(True)
 
 
-# ── 触发判断 ──────────────────────────────────────────────────────
+# ── Trigger logic ────────────────────────────────────────────────
 
 def should_trigger(raw: str, sender_id: int, at_me: bool) -> bool:
     if sender_id == 1:
@@ -51,50 +51,50 @@ def should_trigger(raw: str, sender_id: int, at_me: bool) -> bool:
     return at_me or any(t in raw for t in BOT_TRIGGERS) or '/xin' in raw
 
 
-# ── 消息处理（线程池）────────────────────────────────────────────
+# ── Message handling (thread pool) ───────────────────────────────
 
 def handle_message(msg: tuple, history: list, table: str = None):
     import time as _t
     t0 = _t.time()
     try:
         text = extract_text(msg[3])
-        print(f"[timing] 开始生成回复...", flush=True)
+        print(f"[timing] Generating reply...", flush=True)
         import re as _re
         from config import MY_WXID
         ai_text = generate(history, text, table=table, my_wxid=MY_WXID, chat_wxid=next((wid for wid, t in zip(WATCH_IDS, WATCH_TABLES) if t==table), None))
-        print(f"[timing] Claude耗时: {_t.time()-t0:.2f}s | raw: {repr(ai_text[:20])}", flush=True)
-        # 删掉Claude开头可能自带的所有👾和空白
+        print(f"[timing] Claude took: {_t.time()-t0:.2f}s | raw: {repr(ai_text[:20])}", flush=True)
+        # Strip any leading 👾 and whitespace that Claude may prepend
         ai_text = _re.sub(r'^[\s\U0001F47E]+', '', ai_text)
         reply = REPLY_PREFIX + ai_text
-        print(f"[回复] {reply[:80]}", flush=True)
+        print(f"[reply] {reply[:80]}", flush=True)
         t1 = _t.time()
         if send(reply):
-            print(f"[timing] 发送耗时: {_t.time()-t1:.2f}s | 总耗时: {_t.time()-t0:.2f}s", flush=True)
+            print(f"[timing] Send took: {_t.time()-t1:.2f}s | Total: {_t.time()-t0:.2f}s", flush=True)
     except Exception as e:
-        print(f"[!] 处理出错: {e}", flush=True)
+        print(f"[!] Error handling message: {e}", flush=True)
         traceback.print_exc()
 
 
-# ── 主函数 ────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────
 
 def main():
     print("=" * 50)
-    print(f"  微信AI机器人 | 监听 {len(WATCH_IDS)} 个对话")
+    print(f"  WeChat AI Bot | Watching {len(WATCH_IDS)} conversations")
     print("=" * 50)
 
     if not ANTHROPIC_API_KEY:
-        print("[!] 缺少 ANTHROPIC_API_KEY")
+        print("[!] Missing ANTHROPIC_API_KEY")
         sys.exit(1)
 
-    print("[*] 初始化联系人...")
-    # 私聊对象直接加载
+    print("[*] Initializing contacts...")
+    # Load direct-message contacts
     preload([wid for wid in WATCH_IDS if '@chatroom' not in wid])
-    # 每个对话扫描最近500条消息，把里面出现过的人全部加载进缓存
+    # Scan last 500 messages per conversation and cache every sender found
     for table in WATCH_TABLES:
         preload_from_messages(table)
     from core.contacts import _cache
-    print(f"[*] 已加载 {len(_cache)} 个联系人到缓存")
-    # 初始化每个对话的：last_id、内存历史缓存、已提交集合
+    print(f"[*] Loaded {len(_cache)} contacts into cache")
+    # Initialize per-conversation state: last_id, in-memory history, submitted set
     last_ids:   dict[str, int]   = {}
     history_cache: dict[str, deque] = {}
     submitted:  dict[str, set]   = {}
@@ -105,9 +105,9 @@ def main():
         submitted[table]     = set()
 
     ids_lock = threading.Lock()
-    print(f"[*] 就绪，监听中...\n")
+    print(f"[*] Ready, watching...\n")
 
-    # 监听主DB和WAL文件，任一变化即触发
+    # Watch main DB and WAL file; any change triggers a check
     change_queue: Queue = Queue()
     db_name = os.path.basename(WECHAT_DB_PATH)
     observer = Observer()
@@ -125,12 +125,12 @@ def main():
             except Empty:
                 continue
 
-            # 等50ms让同批事件到齐，全部drain
+            # Wait 50ms for batched events to arrive, then drain all
             time.sleep(0.05)
             while not change_queue.empty():
                 change_queue.get_nowait()
 
-            # 检查各对话新消息
+            # Check each conversation for new messages
             for table in WATCH_TABLES:
                 with ids_lock:
                     new_msgs = get_new_messages(table, last_ids[table])
@@ -138,7 +138,7 @@ def main():
                         last_ids[table] = max(m[0] for m in new_msgs)
 
                 for msg in new_msgs:
-                    # 如果 deque 已满，最老那条即将被挤出 → 后台向量化
+                    # If deque is full, the oldest entry is about to be evicted -> vectorize in background
                     if len(history_cache[table]) >= MAX_HISTORY:
                         oldest = history_cache[table][0]
                         from core.embeddings import store as embed_store
@@ -147,10 +147,10 @@ def main():
                         from core.ai import _extract_sender_wxid
                         old_text = _et(oldest[3])
                         old_wxid = _extract_sender_wxid(oldest[3])
-                        old_sender = _gn(old_wxid) if old_wxid else ("我" if oldest[2] == 1 else "?")
+                        old_sender = _gn(old_wxid) if old_wxid else ("Me" if oldest[2] == 1 else "?")
                         executor.submit(embed_store, table, oldest[0], old_text, old_sender, oldest[1])
 
-                    # 追加到内存缓存（不管是否触发都记录）
+                    # Append to in-memory cache (record regardless of whether trigger fires)
                     history_cache[table].append(msg)
 
                     if now() - msg[1] > 30:
@@ -169,14 +169,14 @@ def main():
                         continue
                     submitted[table].add(msg[0])
 
-                    label = '@我' if at_me else ('自己' if msg[2] == 1 else '关键词')
-                    print(f"[触发/{label}] {text[:50]}", flush=True)
+                    label = '@me' if at_me else ('self' if msg[2] == 1 else 'keyword')
+                    print(f"[trigger/{label}] {text[:50]}", flush=True)
 
                     history_snapshot = list(history_cache[table])
                     executor.submit(handle_message, msg, history_snapshot, table)
 
     except KeyboardInterrupt:
-        print('\n[*] 停止')
+        print('\n[*] Stopped')
     finally:
         observer.stop()
         observer.join()

@@ -1,5 +1,5 @@
-# 敏感文件
-keys/wechat_keys.json
+# Sensitive files
+scripts/keys/wechat_keys.json
 db/
 .env
 .apikey
@@ -14,7 +14,11 @@ __pycache__/
 # macOS
 .DS_Store
 
-# 临时文件
+# Exported chat records and voice transcriptions
+*_聊天记录*.md
+*_voice_map.json
+
+# Temporary files
 /tmp/
 *.log
-keys/find_all_keys_macos
+scripts/keys/find_all_keys_macos

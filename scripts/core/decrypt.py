@@ -1,4 +1,4 @@
-"""查询数据库——优先用本地解密副本，回退到sqlcipher"""
+"""Query the database -- prefer the local decrypted copy, fall back to sqlcipher"""
 import json, os, subprocess, sqlite3, tempfile
 from config import KEYS_FILE, WECHAT_DB_PATH, SQLCIPHER_BIN, DECRYPTED_DB
 
@@ -16,21 +16,21 @@ def get_key() -> str:
 
 
 def query(sql_body: str) -> list[tuple]:
-    """查询消息数据库。优先使用已解密的本地副本（速度快），否则用 sqlcipher"""
-    # 优先使用已解密的副本
+    """Query the message database. Prefers the decrypted local copy (faster), otherwise uses sqlcipher"""
+    # Prefer the decrypted copy
     if os.path.exists(DECRYPTED_DB):
         try:
             conn = sqlite3.connect(DECRYPTED_DB)
-            # 将单个SQL语句（可能含 SELECT）直接执行
+            # Execute a single SQL statement (possibly a SELECT) directly
             sql = sql_body.strip().rstrip(';')
             rows = conn.execute(sql).fetchall()
             conn.close()
-            # 转成字符串元组以保持兼容性
+            # Convert to string tuples for compatibility
             return [tuple(str(c) if c is not None else '' for c in r) for r in rows]
         except Exception:
             pass
 
-    # 回退：用 sqlcipher 查加密 DB
+    # Fallback: query the encrypted DB via sqlcipher
     key = get_key()
     if not key:
         return []
