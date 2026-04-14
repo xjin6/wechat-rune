@@ -34,9 +34,13 @@ _NEEDS_SEARCH_RULES = [
     r"有(没有|无|过)(说|提|聊|讲|谈|讨论)",    # 有没有说/有无提到
     r"(曾经|曾|是否|有否)(说|提|聊|讲|谈)",    # 曾经说过/是否提到
     r"(说过|提过|聊过|讨论过|谈过)",             # 说过/提过
-    r"任何.*关于", r"关于.*的.*事",              # 关于xxx的事
+    r"任何.*关于", r"关于",                      # 关于xxx
     r".+是谁", r".+是什么", r".+怎么了",        # 追问类：xxx是谁/是什么
     r"(他|她|它|那个|这个).*(是|在|做|说|去)",  # 代词追问
+    r"(安排|计划|打算|约|决定|定了)",            # 安排/计划类
+    r"(什么时候|啥时候|几号|几点|哪天)",          # 时间查询
+    r"(怎么说|说啥|说什么|聊什么|讲什么)",        # 内容查询
+    r"(后来|后面|然后|最后|结果)",                # 后续追问
 ]
 
 def _needs_search_heuristic(text: str) -> bool:
@@ -82,9 +86,12 @@ def generate(history: list, trigger_text: str,
 
     # ── RAG ──────────────────────────────────────────────────────
     extra_context = ""
-    if table and _needs_search_heuristic(trigger_text):
+    needs_rag = table and _needs_search_heuristic(trigger_text)
+    print(f"[RAG] heuristic={needs_rag} | text={trigger_text[:60]}", flush=True)
+    if needs_rag:
         from core.rag import retrieve
         extra_context = retrieve(trigger_text, table, MY_WXID, history=history, client=client, chat_wxid=kwargs.get("chat_wxid"))
+        print(f"[RAG] context={len(extra_context)} chars", flush=True)
 
     # 构建对话历史，带发送者名字
     raw = []
@@ -110,7 +117,7 @@ def generate(history: list, trigger_text: str,
     msgs = []
     for m in raw:
         if msgs and msgs[-1]["role"] == m["role"]:
-            msgs[-1]["content"] = m["content"]
+            msgs[-1]["content"] += "\n" + m["content"]
         else:
             msgs.append(m)
 
@@ -125,6 +132,9 @@ def generate(history: list, trigger_text: str,
     # 把 RAG 搜索结果追加到最后一条 user 消息
     if extra_context:
         msgs[-1]["content"] = extra_context + "\n\n" + msgs[-1]["content"]
+
+    total_chars = sum(len(m["content"]) for m in msgs)
+    print(f"[Claude] {len(msgs)} msgs, {total_chars} chars to API", flush=True)
 
     resp = client.messages.create(
         model=AI_MODEL, max_tokens=AI_MAX_TOKENS,

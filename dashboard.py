@@ -1,207 +1,249 @@
 """
-微信AI机器人 Dashboard
-用法：python3.9 dashboard.py
-然后在浏览器打开 http://localhost:7788
+WeChat AI Bot Dashboard — 3秒轮询
+python3.9 dashboard.py → http://localhost:7788
 """
-
-import os, sys, json, hashlib, sqlite3, subprocess
+import os, sys, json, hashlib, sqlite3, subprocess, time, glob, tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-WATCH_FILE  = os.path.join(os.path.dirname(__file__), ".watch")
-VECTOR_DB   = os.path.join(os.path.dirname(__file__), "db", "vectors.db")
-KEYS_FILE   = os.path.join(os.path.dirname(__file__), "keys", "wechat_keys.json")
-SQLCIPHER   = "/opt/homebrew/opt/sqlcipher/bin/sqlcipher"
+WATCH_FILE = os.path.join(os.path.dirname(__file__), ".watch")
+VECTOR_DB  = os.path.join(os.path.dirname(__file__), "db", "vectors.db")
+KEYS_FILE  = os.path.join(os.path.dirname(__file__), "keys", "wechat_keys.json")
+SQLCIPHER  = "/opt/homebrew/opt/sqlcipher/bin/sqlcipher"
+
+def _detect_db_path():
+    base = os.path.expanduser(
+        "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
+    )
+    matches = glob.glob(os.path.join(base, "*_c092", "db_storage", "message", "message_0.db"))
+    if not matches:
+        matches = glob.glob(os.path.join(base, "*", "db_storage", "message", "message_0.db"))
+    return matches[0] if matches else None
+
+_MSG_DB = _detect_db_path()
 
 
-def get_status():
-    # 读 .watch
-    watch_names = []
-    if os.path.exists(WATCH_FILE):
-        for line in open(WATCH_FILE):
-            l = line.strip()
-            if l and not l.startswith("#"):
-                watch_names.append(l)
+def _sqlcipher_query(db_path, key, sql_body):
+    """Run a sqlcipher query and return rows."""
+    fd, sql_file = tempfile.mkstemp(suffix='.sql', prefix='dq_')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(f'PRAGMA key="x\'{key}\'";\nPRAGMA cipher_page_size=4096;\n.separator "|||"\n')
+            f.write(sql_body + '\n')
+        r = subprocess.run([SQLCIPHER, db_path], stdin=open(sql_file),
+                           capture_output=True, text=True, timeout=10)
+    finally:
+        os.unlink(sql_file)
+    rows = []
+    for line in r.stdout.splitlines():
+        if not line or line == 'ok':
+            continue
+        rows.append(tuple(line.split('|||')))
+    return rows
 
-    # bot 进程
+
+def _watched():
+    if not os.path.exists(WATCH_FILE): return []
+    return [l.strip() for l in open(WATCH_FILE) if l.strip() and not l.startswith("#")]
+
+
+def _bot_on():
     r = subprocess.run(["pgrep", "-f", "python3.9 -u bot"], capture_output=True, text=True)
     pids = [p.strip() for p in r.stdout.strip().split() if p.strip()]
-    bot_running = len(pids) > 0
+    return bool(pids), ", ".join(pids)
 
-    # 解析每个监听对话
-    conversations = []
-    for name in watch_names:
-        wxid = name if (name.startswith("wxid_") or "@chatroom" in name) else _resolve_name(name)
-        if not wxid:
-            conversations.append({"name": name, "wxid": "?", "display": name,
-                                   "total": 0, "vectorized": 0, "error": "找不到"})
-            continue
 
-        table = "Msg_" + hashlib.md5(wxid.encode()).hexdigest()
-        display = _get_display_name(wxid) or name
-
-        # 向量化数
+def _counts(wxid):
+    table = "Msg_" + hashlib.md5(wxid.encode()).hexdigest()
+    total = 0
+    if _MSG_DB:
+        try:
+            keys = json.load(open(KEYS_FILE))
+            key = next((v for k, v in keys.items() if "message/message_0.db" in k), "")
+            if key:
+                t = _sqlcipher_query(_MSG_DB, key, f"SELECT COUNT(*) FROM {table} WHERE local_type=1;")
+                total = int(t[0][0]) if t and t[0][0] else 0
+        except Exception:
+            pass
+    try:
+        conn = sqlite3.connect(VECTOR_DB)
+        vec  = conn.execute("SELECT COUNT(*) FROM message_vectors WHERE table_name=?", (table,)).fetchone()[0]
+        conn.close()
+    except Exception:
         vec = 0
-        if os.path.exists(VECTOR_DB):
+    need = max(0, total - 100)
+    pct  = min(100, int(vec / need * 100)) if need > 0 else 100
+    return total, vec, need, pct
+
+
+def _resolve(name):
+    if name.startswith("wxid_") or "@chatroom" in name:
+        # 群聊：尝试从 contact.db 获取群名
+        if "@chatroom" in name and _MSG_DB:
             try:
-                conn = sqlite3.connect(VECTOR_DB)
-                row = conn.execute("SELECT COUNT(*) FROM message_vectors WHERE table_name=?", (table,)).fetchone()
-                vec = row[0] if row else 0
-                conn.close()
+                keys = json.load(open(KEYS_FILE))
+                key = next((v for k, v in keys.items() if "contact/contact.db" in k), "")
+                if key:
+                    db = _MSG_DB.replace("/message/message_0.db", "/contact/contact.db")
+                    rows = _sqlcipher_query(db, key,
+                        f"SELECT nick_name FROM contact WHERE username='{name}' LIMIT 1;")
+                    if rows and rows[0][0]:
+                        return name, rows[0][0]
             except Exception:
                 pass
-
-        # 总消息数
-        total = _count_messages(table)
-
-        conversations.append({
-            "name": name, "wxid": wxid, "display": display,
-            "total": total, "vectorized": vec,
-        })
-
-    return {"bot_running": bot_running, "pids": pids,
-            "conversations": conversations, "watch_file": WATCH_FILE}
-
-
-def _resolve_name(name):
-    """名字 → wxid"""
-    keys = json.load(open(KEYS_FILE)) if os.path.exists(KEYS_FILE) else {}
-    key = next((v for k, v in keys.items() if "contact/contact.db" in k), "")
-    from config import WECHAT_DB_PATH, SQLCIPHER_BIN
-    contact_db = WECHAT_DB_PATH.replace("/message/message_0.db", "/contact/contact.db")
-    if not key or not os.path.exists(contact_db):
-        return None
-    with open("/tmp/dash_q.sql", "w") as f:
-        f.write(f'PRAGMA key = "x\'{key}\'";\nPRAGMA cipher_page_size = 4096;\n.separator "|||"\n')
-        f.write(f"SELECT username FROM contact WHERE (nick_name='{name}' OR remark='{name}') AND username NOT LIKE 'gh_%' LIMIT 1;\n")
-        f.write(f"SELECT username FROM contact WHERE (nick_name LIKE '%{name}%' OR remark LIKE '%{name}%') AND username NOT LIKE 'gh_%' LIMIT 1;\n")
-    r = subprocess.run([SQLCIPHER_BIN, contact_db], stdin=open("/tmp/dash_q.sql"),
-                       capture_output=True, text=True, timeout=5)
-    for line in r.stdout.splitlines():
-        if line and line != "ok" and "|||" not in line:
-            return line.strip()
-        if "|||" in line:
-            return line.split("|||")[0].strip()
-    return None
-
-
-def _get_display_name(wxid):
+        return name, name
     try:
-        from core.contacts import _cache
-        return _cache.get(wxid, "")
+        keys = json.load(open(KEYS_FILE))
+        key  = next((v for k,v in keys.items() if "contact/contact.db" in k), "")
+        if not key or not _MSG_DB:
+            return name, name
+        db = _MSG_DB.replace("/message/message_0.db", "/contact/contact.db")
+        sql = (f"SELECT username,remark,nick_name FROM contact WHERE (nick_name='{name}' OR remark='{name}') AND username NOT LIKE 'gh_%' LIMIT 1;\n"
+               f"SELECT username,remark,nick_name FROM contact WHERE (nick_name LIKE '%{name}%' OR remark LIKE '%{name}%') AND username NOT LIKE 'gh_%' LIMIT 1;\n")
+        rows = _sqlcipher_query(db, key, sql)
+        for r in rows:
+            if len(r) >= 3:
+                return r[0].strip(), (r[1] or r[2] or name).strip()
     except Exception:
-        return ""
+        pass
+    return name, name
 
 
-def _count_messages(table):
-    try:
-        from core.decrypt import query
-        rows = query(f"SELECT COUNT(*) FROM {table} WHERE local_type=1;")
-        return int(rows[0][0]) if rows and rows[0][0] else 0
-    except Exception:
-        return 0
+def get_data():
+    bot, pids = _bot_on()
+    convs = []
+    for name in _watched():
+        wxid, display = _resolve(name)
+        total, vec, need, pct = _counts(wxid)
+        convs.append({"id": wxid, "display": display,
+                      "total": total, "vec": vec, "need": need, "pct": pct})
+    return {"bot": bot, "pids": pids, "convs": convs}
 
 
-HTML_TEMPLATE = """<!DOCTYPE html>
+PAGE = r"""<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="refresh" content="5">
 <title>WeChat AI Bot</title>
 <style>
-  body {{ font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; background: #f5f5f7; color: #1d1d1f; }}
-  h1 {{ font-size: 28px; font-weight: 600; }}
-  .card {{ background: white; border-radius: 12px; padding: 20px; margin: 16px 0; box-shadow: 0 2px 8px rgba(0,0,0,.08); }}
-  .status {{ display: flex; align-items: center; gap: 10px; }}
-  .dot {{ width: 10px; height: 10px; border-radius: 50%; }}
-  .green {{ background: #30d158; }}
-  .red {{ background: #ff3b30; }}
-  .label {{ font-size: 13px; color: #666; margin-bottom: 4px; }}
-  .value {{ font-size: 16px; font-weight: 500; }}
-  .chat-row {{ display: flex; align-items: center; padding: 12px 0; border-bottom: 1px solid #f0f0f0; gap: 16px; }}
-  .chat-row:last-child {{ border-bottom: none; }}
-  .chat-name {{ flex: 1; font-weight: 500; }}
-  .chat-sub {{ font-size: 12px; color: #999; margin-top: 2px; }}
-  .progress-wrap {{ flex: 2; }}
-  .progress-bar {{ height: 6px; background: #e5e5ea; border-radius: 3px; overflow: hidden; }}
-  .progress-fill {{ height: 100%; background: #007aff; border-radius: 3px; transition: width .3s; }}
-  .progress-text {{ font-size: 12px; color: #666; margin-top: 4px; }}
-  .badge {{ font-size: 12px; padding: 3px 8px; border-radius: 6px; font-weight: 500; }}
-  .badge-ok {{ background: #d1fae5; color: #065f46; }}
-  .badge-wip {{ background: #fef3c7; color: #92400e; }}
-  .refresh {{ font-size: 12px; color: #999; text-align: right; margin-top: 8px; }}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"PingFang SC",sans-serif;background:#f5f5f7;color:#1d1d1f;padding:32px 20px}
+.wrap{max-width:660px;margin:0 auto}
+h1{font-size:24px;font-weight:700;margin-bottom:20px}
+.card{background:#fff;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.07)}
+.status{display:flex;align-items:center;gap:10px}
+.dot{width:9px;height:9px;border-radius:50%;transition:background .5s}
+.st{font-size:15px;font-weight:500}
+.sub{font-size:12px;color:#999;margin-top:2px}
+.row{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:.5px solid #f0f0f0}
+.row:last-child{border:none}
+.info{min-width:160px}
+.name{font-size:15px;font-weight:500}
+.nums{font-size:12px;color:#999;margin-top:3px}
+.bar-wrap{flex:1}
+.bar{height:6px;background:#e5e5ea;border-radius:3px;overflow:hidden}
+.fill{height:100%;border-radius:3px;transition:width .6s ease}
+.pct-txt{font-size:11px;color:#999;margin-top:4px}
+.badge{font-size:12px;padding:3px 9px;border-radius:6px;font-weight:600;white-space:nowrap;transition:all .3s}
+.ok{background:#d1fae5;color:#065f46}
+.wip{background:#fef3c7;color:#92400e}
+.live{font-size:11px;color:#bbb;text-align:right;margin-top:8px;display:flex;align-items:center;justify-content:flex-end;gap:5px}
+.pulse{width:6px;height:6px;border-radius:50%;background:#30d158;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
 </style>
 </head>
 <body>
+<div class="wrap">
 <h1>👾 WeChat AI Bot</h1>
 
 <div class="card">
   <div class="status">
-    <div class="dot {dot_class}"></div>
+    <div class="dot" id="dot"></div>
     <div>
-      <div class="value">Bot {bot_status}</div>
-      <div class="label">PID: {pids}</div>
+      <div class="st" id="bot-st">连接中...</div>
+      <div class="sub" id="bot-sub">—</div>
     </div>
   </div>
 </div>
 
 <div class="card">
-  <div style="font-weight:600;margin-bottom:12px;">监听中的对话 ({count})</div>
-  {chat_rows}
+  <div style="font-weight:600;margin-bottom:12px">监听中的对话 (<span id="n">—</span>)</div>
+  <div id="convs"></div>
 </div>
 
-<div class="refresh">每5秒自动刷新</div>
+<div class="live"><div class="pulse"></div>实时更新中</div>
+</div>
+
+<script>
+function update(d) {
+  document.getElementById('dot').style.background = d.bot ? '#30d158' : '#ff3b30';
+  document.getElementById('bot-st').textContent = d.bot ? '运行中' : '已停止';
+  document.getElementById('bot-sub').textContent = d.bot ? 'PID: ' + d.pids : '—';
+  document.getElementById('n').textContent = d.convs.length;
+
+  const container = document.getElementById('convs');
+  d.convs.forEach(c => {
+    let row = document.getElementById('row-' + c.id);
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'row';
+      row.id = 'row-' + c.id;
+      row.innerHTML = `
+        <div class="info">
+          <div class="name">${c.display}</div>
+          <div class="nums" id="nums-${c.id}"></div>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar"><div class="fill" id="fill-${c.id}" style="width:0%"></div></div>
+          <div class="pct-txt" id="pct-${c.id}"></div>
+        </div>
+        <span class="badge" id="badge-${c.id}"></span>`;
+      container.appendChild(row);
+    }
+    const pct = c.pct;
+    const done = pct >= 85;
+    const color = done ? '#30d158' : (pct > 50 ? '#007aff' : '#ff9500');
+    document.getElementById('fill-' + c.id).style.cssText = `width:${pct}%;background:${color}`;
+    document.getElementById('nums-' + c.id).textContent = `共 ${c.total} 条 · 历史 ${c.need} 条`;
+    document.getElementById('pct-' + c.id).textContent = `${Math.min(c.vec, c.need)}/${c.need} 已向量化`;
+    const badge = document.getElementById('badge-' + c.id);
+    badge.textContent = done ? '✓ 完成' : pct + '%';
+    badge.className = 'badge ' + (done ? 'ok' : 'wip');
+  });
+}
+function poll() {
+  fetch('/api').then(r => r.json()).then(update).catch(() => {
+    document.getElementById('bot-st').textContent = 'Dashboard 连接断开';
+  });
+}
+poll();
+setInterval(poll, 3000);
+</script>
 </body>
 </html>"""
 
 
-class Handler(BaseHTTPRequestHandler):
+class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        status = get_status()
+        if self.path == "/api":
+            data = json.dumps(get_data())
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(data.encode())
+            return
 
-        dot = "green" if status["bot_running"] else "red"
-        bot_txt = "运行中" if status["bot_running"] else "已停止"
-        pids_txt = ", ".join(status["pids"]) if status["pids"] else "—"
-
-        rows = ""
-        for c in status["conversations"]:
-            total = c["total"]
-            vec = c["vectorized"]
-            deque_size = min(total, 100)
-            need_vec = max(0, total - deque_size)
-            pct = min(100, int(vec / need_vec * 100)) if need_vec > 0 else 100
-            done = vec >= need_vec * 0.85  # 85%以上视为完成（部分消息因内容太短被跳过）
-            badge = f'<span class="badge badge-ok">✓ 向量化完成</span>' if done else f'<span class="badge badge-wip">向量化中 {pct}%</span>'
-            rows += f"""
-            <div class="chat-row">
-              <div>
-                <div class="chat-name">{c["display"] or c["name"]}</div>
-                <div class="chat-sub">{c["wxid"][:30]}</div>
-              </div>
-              <div class="progress-wrap">
-                <div class="progress-bar"><div class="progress-fill" style="width:{pct}%"></div></div>
-                <div class="progress-text">
-                  共 {total} 条消息 · 最近100条在内存 · {min(vec, need_vec)}/{need_vec} 历史消息已向量化
-                </div>
-              </div>
-              {badge}
-            </div>"""
-
-        html = HTML_TEMPLATE.format(
-            dot_class=dot, bot_status=bot_txt, pids=pids_txt,
-            count=len(status["conversations"]), chat_rows=rows
-        )
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(html.encode())
+        self.wfile.write(PAGE.encode())
 
-    def log_message(self, *args):
-        pass  # 静默日志
+    def log_message(self, *a): pass
 
 
 if __name__ == "__main__":
     port = 7788
-    print(f"Dashboard: http://localhost:{port}")
-    HTTPServer(("", port), Handler).serve_forever()
+    print(f"Dashboard → http://localhost:{port}")
+    HTTPServer(("", port), H).serve_forever()

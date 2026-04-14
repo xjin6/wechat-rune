@@ -102,7 +102,7 @@ def run(process):
         if salt in key_map:
             result[rel] = key_map[salt]
 
-    out = "/Users/xinjin/Desktop/vibe-coding/wechat-db-decrypt-macos/wechat_keys.json"
+    out = "/Users/xinjin/Desktop/vibe-coding/wechat-ai-bot/keys/wechat_keys.json"
     f = open(out, "w")
     json.dump(result, f, indent=2)
     f.close()
