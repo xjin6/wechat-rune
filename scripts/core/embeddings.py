@@ -5,9 +5,9 @@ Supports semantic search as a complement to keyword search (RAG long-term memory
 
 import os, sqlite3, json, time
 import numpy as np
-from config import BASE_DIR
+from config import PROJECT_ROOT
 
-VECTOR_DB = os.path.join(BASE_DIR, "db", "vectors.db")
+VECTOR_DB = os.path.join(PROJECT_ROOT, "db", "vectors.db")
 MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
 _model = None

@@ -1,8 +1,8 @@
 """
 WeChat AI Bot Dashboard — 3-second polling
-python3.9 dashboard.py → http://localhost:7788
+python scripts/dashboard.py → http://localhost:7788
 """
-import os, sys, json, hashlib, sqlite3, subprocess, time, glob, tempfile
+import os, sys, json, hashlib, sqlite3, time, glob, tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -12,65 +12,76 @@ sys.path.insert(0, SCRIPT_DIR)
 WATCH_FILE = os.path.join(PROJECT_ROOT, ".watch")
 VECTOR_DB  = os.path.join(PROJECT_ROOT, "db", "vectors.db")
 KEYS_FILE  = os.path.join(SCRIPT_DIR, "keys", "wechat_keys.json")
-SQLCIPHER  = "/opt/homebrew/opt/sqlcipher/bin/sqlcipher"
 
-def _detect_db_path():
-    base = os.path.expanduser(
-        "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
-    )
-    matches = glob.glob(os.path.join(base, "*_c092", "db_storage", "message", "message_0.db"))
-    if not matches:
-        matches = glob.glob(os.path.join(base, "*", "db_storage", "message", "message_0.db"))
+
+def _detect_msg_db():
+    """Auto-detect message_0.db path on current platform."""
+    from config import XWECHAT_FILES
+    if not XWECHAT_FILES or not os.path.isdir(XWECHAT_FILES):
+        return None
+    matches = glob.glob(os.path.join(XWECHAT_FILES, "*", "db_storage", "message", "message_0.db"))
     return matches[0] if matches else None
 
-_MSG_DB = _detect_db_path()
+
+_MSG_DB = _detect_msg_db()
 
 
-def _sqlcipher_query(db_path, key, sql_body):
-    """Run a sqlcipher query and return rows."""
-    fd, sql_file = tempfile.mkstemp(suffix='.sql', prefix='dq_')
-    try:
-        with os.fdopen(fd, 'w') as f:
-            f.write(f'PRAGMA key="x\'{key}\'";\nPRAGMA cipher_page_size=4096;\n.separator "|||"\n')
-            f.write(sql_body + '\n')
-        r = subprocess.run([SQLCIPHER, db_path], stdin=open(sql_file),
-                           capture_output=True, text=True, timeout=10)
-    finally:
-        os.unlink(sql_file)
-    rows = []
-    for line in r.stdout.splitlines():
-        if not line or line == 'ok':
-            continue
-        rows.append(tuple(line.split('|||')))
-    return rows
+def _sqlcipher_query(db_path: str, key: str, sql_body: str) -> list:
+    from core.decrypt import _sqlcipher_query as _sq
+    return _sq(db_path, key, sql_body)
 
 
-def _watched():
-    if not os.path.exists(WATCH_FILE): return []
-    return [l.strip() for l in open(WATCH_FILE) if l.strip() and not l.startswith("#")]
+def _watched() -> list:
+    if not os.path.exists(WATCH_FILE):
+        return []
+    with open(WATCH_FILE, encoding='utf-8') as f:
+        return [l.strip() for l in f if l.strip() and not l.startswith('#')]
 
 
-def _bot_on():
-    r = subprocess.run(["pgrep", "-f", "python3.9 -u bot"], capture_output=True, text=True)
-    pids = [p.strip() for p in r.stdout.strip().split() if p.strip()]
-    return bool(pids), ", ".join(pids)
+def _bot_running() -> tuple[bool, str]:
+    """Check if bot.py is running. Cross-platform."""
+    import subprocess
+    if sys.platform == 'win32':
+        r = subprocess.run(
+            ['tasklist', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV'],
+            capture_output=True, text=True
+        )
+        # Check if bot.py appears in command lines via wmic
+        r2 = subprocess.run(
+            ['wmic', 'process', 'where', 'name="python.exe"', 'get', 'ProcessId,CommandLine'],
+            capture_output=True, text=True
+        )
+        pids = []
+        for line in r2.stdout.splitlines():
+            if 'bot.py' in line:
+                parts = line.strip().split()
+                if parts:
+                    pids.append(parts[-1])
+        return bool(pids), ', '.join(pids)
+    else:
+        r = subprocess.run(['pgrep', '-f', 'bot.py'], capture_output=True, text=True)
+        pids = [p.strip() for p in r.stdout.strip().split() if p.strip()]
+        return bool(pids), ', '.join(pids)
 
 
-def _counts(wxid):
+def _counts(wxid: str) -> tuple[int, int, int, int]:
     table = "Msg_" + hashlib.md5(wxid.encode()).hexdigest()
     total = 0
     if _MSG_DB:
         try:
             keys = json.load(open(KEYS_FILE))
-            key = next((v for k, v in keys.items() if "message/message_0.db" in k), "")
+            key  = next((v for k, v in keys.items() if "message/message_0.db" in k.replace("\\", "/")), "")
             if key:
-                t = _sqlcipher_query(_MSG_DB, key, f"SELECT COUNT(*) FROM {table} WHERE local_type=1;")
-                total = int(t[0][0]) if t and t[0][0] else 0
+                rows = _sqlcipher_query(_MSG_DB, key,
+                    f"SELECT COUNT(*) FROM {table} WHERE local_type=1;")
+                total = int(rows[0][0]) if rows and rows[0][0] else 0
         except Exception:
             pass
     try:
         conn = sqlite3.connect(VECTOR_DB)
-        vec  = conn.execute("SELECT COUNT(*) FROM message_vectors WHERE table_name=?", (table,)).fetchone()[0]
+        vec  = conn.execute(
+            "SELECT COUNT(*) FROM message_vectors WHERE table_name=?", (table,)
+        ).fetchone()[0]
         conn.close()
     except Exception:
         vec = 0
@@ -79,16 +90,25 @@ def _counts(wxid):
     return total, vec, need, pct
 
 
-def _resolve(name):
+def _contact_db_path() -> str | None:
+    if not _MSG_DB:
+        return None
+    return _MSG_DB.replace(
+        os.sep + "message" + os.sep + "message_0.db",
+        os.sep + "contact" + os.sep + "contact.db"
+    )
+
+
+def _resolve(name: str) -> tuple[str, str]:
     if name.startswith("wxid_") or "@chatroom" in name:
-        # Group chat: try to get group name from contact.db
-        if "@chatroom" in name and _MSG_DB:
+        if "@chatroom" in name:
             try:
                 keys = json.load(open(KEYS_FILE))
-                key = next((v for k, v in keys.items() if "contact/contact.db" in k), "")
-                if key:
-                    db = _MSG_DB.replace("/message/message_0.db", "/contact/contact.db")
-                    rows = _sqlcipher_query(db, key,
+                key  = next((v for k, v in keys.items()
+                             if "contact/contact.db" in k.replace("\\", "/")), "")
+                cdb  = _contact_db_path()
+                if key and cdb:
+                    rows = _sqlcipher_query(cdb, key,
                         f"SELECT nick_name FROM contact WHERE username='{name}' LIMIT 1;")
                     if rows and rows[0][0]:
                         return name, rows[0][0]
@@ -97,23 +117,25 @@ def _resolve(name):
         return name, name
     try:
         keys = json.load(open(KEYS_FILE))
-        key  = next((v for k,v in keys.items() if "contact/contact.db" in k), "")
-        if not key or not _MSG_DB:
+        key  = next((v for k, v in keys.items()
+                     if "contact/contact.db" in k.replace("\\", "/")), "")
+        cdb  = _contact_db_path()
+        if not key or not cdb:
             return name, name
-        db = _MSG_DB.replace("/message/message_0.db", "/contact/contact.db")
-        sql = (f"SELECT username,remark,nick_name FROM contact WHERE (nick_name='{name}' OR remark='{name}') AND username NOT LIKE 'gh_%' LIMIT 1;\n"
-               f"SELECT username,remark,nick_name FROM contact WHERE (nick_name LIKE '%{name}%' OR remark LIKE '%{name}%') AND username NOT LIKE 'gh_%' LIMIT 1;\n")
-        rows = _sqlcipher_query(db, key, sql)
+        rows = _sqlcipher_query(cdb, key,
+            f"SELECT username, nick_name FROM contact "
+            f"WHERE (nick_name LIKE '%{name}%' OR remark LIKE '%{name}%') "
+            f"AND username NOT LIKE 'gh_%' LIMIT 1;")
         for r in rows:
-            if len(r) >= 3:
-                return r[0].strip(), (r[1] or r[2] or name).strip()
+            if len(r) >= 2:
+                return r[0].strip(), r[1].strip() or name
     except Exception:
         pass
     return name, name
 
 
-def get_data():
-    bot, pids = _bot_on()
+def get_data() -> dict:
+    bot, pids = _bot_running()
     convs = []
     for name in _watched():
         wxid, display = _resolve(name)
@@ -157,7 +179,7 @@ h1{font-size:24px;font-weight:700;margin-bottom:20px}
 </head>
 <body>
 <div class="wrap">
-<h1>👾 WeChat AI Bot</h1>
+<h1>WeChat AI Bot</h1>
 
 <div class="card">
   <div class="status">
@@ -236,13 +258,13 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data.encode())
             return
-
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
         self.wfile.write(PAGE.encode())
 
-    def log_message(self, *a): pass
+    def log_message(self, *a):
+        pass
 
 
 if __name__ == "__main__":
