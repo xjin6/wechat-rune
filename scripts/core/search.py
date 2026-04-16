@@ -1,4 +1,12 @@
-"""Historical message search -- used for RAG dynamic context expansion"""
+"""
+Historical message search — used for RAG dynamic context expansion.
+
+Windows schema differences from Mac:
+  - Single MSG table with StrTalker filter (no per-conversation Msg_<md5> tables)
+  - StrContent is plain text (no hex+zstd encoding)
+  - IsSender field (0/1) instead of real_sender_id
+  - Column names: localId, CreateTime, IsSender, StrContent, BytesExtra
+"""
 import time
 from core.decrypt import query
 from core.reader import extract_text, decode_raw
@@ -16,8 +24,8 @@ TIME_RANGES = {
     "最近一个月": 30,
 }
 
+
 def parse_days(time_str: str) -> int:
-    """Convert a time description to number of days; defaults to 30 if not found"""
     if not time_str:
         return 30
     for k, v in TIME_RANGES.items():
@@ -27,11 +35,10 @@ def parse_days(time_str: str) -> int:
 
 
 def parse_date_range(text: str):
-    """Extract a specific date from text, return (start_ts, end_ts) or None"""
+    """Extract a specific date from text, return (start_ts, end_ts) or None."""
     import re, datetime
     now = datetime.datetime.now()
 
-    # Match "4月1号" / "4月1日"
     m = re.search(r'(\d+)月(\d+)[号日]', text)
     if m:
         month, day = int(m.group(1)), int(m.group(2))
@@ -39,12 +46,10 @@ def parse_date_range(text: str):
         try:
             dt = datetime.datetime(year, month, day)
             start = int(dt.timestamp())
-            end = start + 86400  # same day
-            return start, end
+            return start, start + 86400
         except ValueError:
             pass
 
-    # Match "4/1" / "4-1"
     m = re.search(r'(\d{1,2})[/-](\d{1,2})', text)
     if m:
         month, day = int(m.group(1)), int(m.group(2))
@@ -52,8 +57,7 @@ def parse_date_range(text: str):
         try:
             dt = datetime.datetime(year, month, day)
             start = int(dt.timestamp())
-            end = start + 86400
-            return start, end
+            return start, start + 86400
         except ValueError:
             pass
 
@@ -66,25 +70,42 @@ def search_messages(table: str, person_wxid: str = None,
                     keyword: str = None, days: int = 30,
                     limit: int = 20, date_range=None) -> list[tuple]:
     """
-    Search historical messages in the specified conversation table.
-    Returns tuples in the same format as the deque:
-    (local_id, create_time, real_sender_id, hex_content, hex_source)
+    Search historical text messages in the specified conversation.
+    `table` is the StrTalker value (wxid or chatroom ID).
+
+    Returns tuples: (localId, CreateTime, IsSender, StrContent, hex_BytesExtra)
     """
+    from config import MY_WXID
+
     if date_range:
         start_ts, end_ts = date_range
-        conditions = [f"local_type = 1", f"create_time >= {start_ts}", f"create_time < {end_ts}"]
+        conditions = [
+            f"StrTalker = '{table}'",
+            "Type = 1",
+            f"CreateTime >= {start_ts}",
+            f"CreateTime < {end_ts}",
+        ]
     else:
         since_ts = int(time.time()) - days * 86400
-        conditions = [f"local_type = 1", f"create_time >= {since_ts}"]
+        conditions = [
+            f"StrTalker = '{table}'",
+            "Type = 1",
+            f"CreateTime >= {since_ts}",
+        ]
 
-    # Filter by keyword (searching inside hex content is cumbersome, so fetch first then filter)
+    # Sender filter
+    if person_wxid:
+        if person_wxid == MY_WXID:
+            conditions.append("IsSender = 1")
+        else:
+            conditions.append("IsSender = 0")  # received messages
+
     sql = (
-        f"SELECT local_id, create_time, real_sender_id, "
-        f"hex(message_content), hex(source) "
-        f"FROM {table} "
+        f"SELECT localId, CreateTime, IsSender, StrContent, hex(BytesExtra) "
+        f"FROM MSG "
         f"WHERE {' AND '.join(conditions)} "
-        f"ORDER BY create_time DESC "
-        f"LIMIT {limit * 5};"  # Fetch extra rows, filter afterwards
+        f"ORDER BY CreateTime DESC "
+        f"LIMIT {limit * 5};"
     )
     rows = query(sql)
     results = []
@@ -97,19 +118,9 @@ def search_messages(table: str, person_wxid: str = None,
             continue
 
         text = extract_text(msg[3])
-        if not text or text.startswith("<"):
+        if not text or text.startswith('<'):
             continue
 
-        # Filter by sender
-        if person_wxid:
-            raw = decode_raw(msg[3])
-            sender_in_content = raw.split("\n")[0].rstrip(":") if "\n" in raw else ""
-            if sender_in_content != person_wxid and msg[2] == 1:
-                continue
-            if sender_in_content and sender_in_content != person_wxid:
-                continue
-
-        # Filter by keyword
         if keyword and keyword.lower() not in text.lower():
             continue
 
@@ -117,17 +128,16 @@ def search_messages(table: str, person_wxid: str = None,
         if len(results) >= limit:
             break
 
-    return list(reversed(results))  # Chronological order
+    return list(reversed(results))
 
 
 def fetch_context(table: str, local_id: int, window: int = 5) -> list[tuple]:
-    """Fetch messages around a given local_id (window before and after) for conversation context"""
+    """Fetch messages around a given localId for conversation context."""
     rows = query(
-        f"SELECT local_id, create_time, real_sender_id, "
-        f"hex(message_content), hex(source) "
-        f"FROM {table} WHERE local_type = 1 "
-        f"AND local_id BETWEEN {local_id - window} AND {local_id + window} "
-        f"ORDER BY create_time ASC;"
+        f"SELECT localId, CreateTime, IsSender, StrContent, hex(BytesExtra) "
+        f"FROM MSG WHERE StrTalker = '{table}' AND Type = 1 "
+        f"AND localId BETWEEN {local_id - window} AND {local_id + window} "
+        f"ORDER BY CreateTime ASC;"
     )
     result = []
     for r in rows:
@@ -141,23 +151,14 @@ def fetch_context(table: str, local_id: int, window: int = 5) -> list[tuple]:
 
 
 def format_search_results(msgs: list[tuple], my_wxid: str) -> str:
-    """Format search results as text to be appended to the context"""
+    """Format search results as readable text to append to AI context."""
     if not msgs:
         return ""
-    lines = ["[The following are relevant messages retrieved from history]"]
     import datetime
+    lines = ["[The following are relevant messages retrieved from history]"]
     for msg in msgs:
         t = datetime.datetime.fromtimestamp(msg[1]).strftime("%m-%d %H:%M")
-        raw = decode_raw(msg[3])
-        sender_wxid = ""
-        if "\n" in raw:
-            first = raw.split("\n", 1)[0].strip().rstrip(":")
-            import re
-            if re.match(r"^[\w]{4,30}$", first):
-                sender_wxid = first
-        if sender_wxid and sender_wxid != my_wxid:
-            name = get_name(sender_wxid)
-        elif msg[2] == 1:
+        if msg[2] == 1:
             name = "me"
         else:
             name = "other"

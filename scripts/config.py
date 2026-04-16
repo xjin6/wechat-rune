@@ -1,28 +1,27 @@
 """
-WeChat AI Bot configuration
+WeChat AI Bot configuration (Windows)
 
 All sensitive values are passed via environment variables; do not hard-code them here.
-Copy .env.example to .env, fill in real values, then source .env before starting.
+Copy .env.example to .env, fill in real values, then run: set /p < .env  (or use dotenv)
 """
 import os
 import hashlib
 
 # ── Identity ─────────────────────────────────────────────────────
-# Your WeChat wxid (visible in the DB path after login, e.g. magicxinjx from magicxinjx_c092)
+# Your WeChat wxid (the folder name under WeChat Files, e.g. "wxid_xxxxxxxx")
 MY_WXID = os.environ.get("WECHAT_MY_WXID", "your_wxid_here")
 
 # ── Watched conversations ────────────────────────────────────────
 # Group ID (xxxxx@chatroom) or personal wxid, comma-separated
-# Example: export WECHAT_WATCH_IDS="12345678@chatroom,wxid_xxxxxxxx"
 _watch_env = os.environ.get("WECHAT_WATCH_IDS", "")
 WATCH_IDS = [w.strip() for w in _watch_env.split(",") if w.strip()] if _watch_env else []
-WATCH_TABLES = ["Msg_" + hashlib.md5(wid.encode()).hexdigest() for wid in WATCH_IDS]
+# Windows: "tables" are conversation IDs (StrTalker values), not DB table names
+WATCH_TABLES = WATCH_IDS
 
 # ── Trigger words ────────────────────────────────────────────────
-# Messages from others containing these words will trigger the bot; self can only trigger via /xin
 BOT_TRIGGERS = os.environ.get("BOT_TRIGGERS", "小昕,/xin").split(",")
 
-# ── Other (defined before AI_SYSTEM_PROMPT because the prompt references MAX_HISTORY) ──
+# ── Other ────────────────────────────────────────────────────────
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "100"))
 
 # ── AI ───────────────────────────────────────────────────────────
@@ -42,20 +41,35 @@ AI_SYSTEM_PROMPT = (
     "Stop when you are done; never add any closing sentence. Do not start replies with " + REPLY_PREFIX.strip() + "."
 )
 
-# ── Paths (auto-generated from your WeChat account; can be overridden via env vars) ──
-SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))   # scripts/
-PROJECT_ROOT  = os.path.dirname(SCRIPT_DIR)                  # project root
-KEYS_FILE     = os.path.join(SCRIPT_DIR, "keys", "wechat_keys.json")
-DB_DIR        = os.path.join(PROJECT_ROOT, "db")
-DECRYPTED_DB  = os.path.join(DB_DIR, "message_0.db")
-SQLCIPHER_BIN = os.environ.get("SQLCIPHER_BIN", "/opt/homebrew/opt/sqlcipher/bin/sqlcipher")
+# ── Paths ────────────────────────────────────────────────────────
+SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))   # scripts/
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)                  # project root
+KEYS_FILE    = os.path.join(SCRIPT_DIR, "keys", "wechat_keys.json")
+DB_DIR       = os.path.join(PROJECT_ROOT, "db")
 
-# WeChat database path (contains your wxid; replace as needed)
-# Format: ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>_xxxx/db_storage/message/message_0.db
+# Decrypted DB cache paths (written by decrypt_db.py, used for fast queries)
+DECRYPTED_MSG_DB     = os.path.join(DB_DIR, "MSG0.db")
+DECRYPTED_CONTACT_DB = os.path.join(DB_DIR, "MicroMsg.db")
+
+# Windows WeChat data root: %USERPROFILE%\Documents\WeChat Files\<wxid>\
+WECHAT_FILES_ROOT = os.environ.get(
+    "WECHAT_FILES_ROOT",
+    os.path.join(os.path.expanduser("~"), "Documents", "WeChat Files")
+)
+
+# Main message database — watch this for new messages
 WECHAT_DB_PATH = os.environ.get(
     "WECHAT_DB_PATH",
-    os.path.expanduser(f"~/Library/Containers/com.tencent.xinWeChat/Data/Documents"
-                       f"/xwechat_files/{MY_WXID}_c092/db_storage/message/message_0.db")
+    os.path.join(WECHAT_FILES_ROOT, MY_WXID, "Msg", "MSG0.db")
 )
 WECHAT_WAL_PATH = WECHAT_DB_PATH + "-wal"
 
+# Contact / group info database
+WECHAT_CONTACT_DB = os.environ.get(
+    "WECHAT_CONTACT_DB",
+    os.path.join(WECHAT_FILES_ROOT, MY_WXID, "Msg", "MicroMsg.db")
+)
+
+# SQLCipher binary path (fallback if sqlcipher3-binary package not installed)
+# Download: https://github.com/nalgeon/sqlean/releases  or  choco install sqlcipher
+SQLCIPHER_BIN = os.environ.get("SQLCIPHER_BIN", r"C:\sqlcipher\sqlcipher.exe")

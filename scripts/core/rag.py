@@ -101,36 +101,19 @@ def _is_chat_member(person_wxid: str, chat_wxid: str) -> bool:
 
 
 def _load_group_members(chatroom_wxid: str) -> set:
-    """Load group member wxids from the chatroom_member table in contact.db"""
-    import subprocess, json
-    from config import KEYS_FILE, SQLCIPHER_BIN, WECHAT_DB_PATH
+    """Load group member wxids from the ChatRoom table in MicroMsg.db (Windows)."""
+    from core.decrypt import query_contact
 
-    contact_db = WECHAT_DB_PATH.replace("/message/message_0.db", "/contact/contact.db")
-    key = next((v for k, v in json.load(open(KEYS_FILE)).items()
-                if "contact/contact.db" in k), "")
-    if not key:
-        return set()
-
-    with open('/tmp/members_q.sql', 'w') as f:
-        f.write('PRAGMA key = "x\'%s\'";\n' % key)
-        f.write('PRAGMA cipher_page_size = 4096;\n')
-        f.write('.separator "|||"\n')
-        # room_id corresponds to contact.id; first find the group's id
-        f.write(f"SELECT cm.member_id, c.username FROM chatroom_member cm "
-                f"JOIN contact c2 ON c2.id = cm.room_id AND c2.username = '{chatroom_wxid}' "
-                f"JOIN contact c ON c.id = cm.member_id;\n")
-
-    r = subprocess.run(
-        [SQLCIPHER_BIN, contact_db],
-        stdin=open('/tmp/members_q.sql'),
-        capture_output=True, text=True, timeout=5
+    rows = query_contact(
+        f"SELECT MemberList FROM ChatRoom WHERE ChatRoomName = '{chatroom_wxid}' LIMIT 1;"
     )
     members = set()
-    for line in r.stdout.splitlines():
-        if '|||' in line:
-            parts = line.split('|||')
-            if len(parts) >= 2 and parts[1].strip():
-                members.add(parts[1].strip())
+    for row in rows:
+        if row and row[0]:
+            for wxid in row[0].split(';'):
+                wxid = wxid.strip()
+                if wxid:
+                    members.add(wxid)
     return members
 
 

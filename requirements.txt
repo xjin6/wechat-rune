@@ -1,10 +1,18 @@
-# Core: chat export & decryption
+# ── Core (required) ───────────────────────────────────────────────
+# SQLCipher Python wrapper — pre-built wheel for Windows
+# Replaces the sqlcipher binary used in the Mac version
+sqlcipher3-binary
+
+# Message content decompression (some auxiliary data uses zstd)
 zstandard
 
-# Voice transcription (Step 3, optional)
+# Process enumeration for key extraction
+psutil
+
+# ── Step 3: Voice transcription (optional) ───────────────────────
 openai-whisper
 
-# AI bot (Step 4, optional)
+# ── Step 4: AI bot (optional) ────────────────────────────────────
 anthropic
 watchdog
 sentence-transformers
