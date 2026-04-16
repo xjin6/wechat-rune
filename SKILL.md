@@ -123,12 +123,20 @@ sample transcribed lines every 50 entries so they know it's working.
 
 ### 3c. AI correction (do this automatically — no user input needed)
 
-After transcription completes, immediately read `name_voice_map.json` and correct:
-- Common Whisper Mandarin mishears: 精华→清华, 王主龙腰→王者荣耀, 用言→用研, Germany→Gemini
-- Repeated noise characters (GGGG..., etc.)
-- App/product name mishears: No Book LM→NotebookLM, PayPay→PayPal, Visac→Visa
+After transcription completes, immediately correct the voice_map.json by **reading the
+actual content in batches of 50 entries**. Do NOT rely on a pre-defined error list —
+that approach only catches patterns seen before and misses anything new.
 
-Write corrections back inline with `"corrections": [...]` field. Then re-export:
+For each batch:
+1. Read the transcribed text as natural language
+2. Ask: does each sentence make semantic sense in Chinese?
+3. Fix words that are phonetically plausible mishears (same sound, wrong character)
+4. Common categories to watch for — but always judge from context, not from this list:
+   - Proper nouns: school names, app names, product names, company names
+   - Technical terms: 用研 (UXR), 选修课, 劳动课, specific tools/platforms
+   - Audio noise at end of long recordings (repeated characters like GGGG…)
+
+Write corrections back with `"corrections": ["wrong→right"]` field. Then re-export:
 
 ```bash
 python scripts/export_chat.py --name "nickname" --voice-json nickname_voice_map.json
