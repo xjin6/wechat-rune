@@ -1,9 +1,8 @@
 # ── Core (required) ───────────────────────────────────────────────
 # SQLCipher Python wrapper — pre-built wheel for Windows
-# Replaces the sqlcipher binary used in the Mac version
 sqlcipher3-binary
 
-# Message content decompression (some auxiliary data uses zstd)
+# Message content decompression
 zstandard
 
 # Process enumeration for key extraction
@@ -12,7 +11,10 @@ psutil
 # ── Step 3: Voice transcription (optional) ───────────────────────
 openai-whisper
 
-# ── Step 4: AI bot (optional) ────────────────────────────────────
+# Windows SILK audio decoder (replaces the compiled silk-v3-decoder binary on Mac)
+pilk
+
+# ── Step 4: AI bot + voice correction (optional) ─────────────────
 anthropic
 watchdog
 sentence-transformers

@@ -151,7 +151,7 @@ def search_contacts(keys_file: str, db_dir: str, name_query: str, group: bool = 
         if len(row) < 3:
             continue
         wxid, nick, remark = row[0].strip(), row[1].strip(), row[2].strip()
-        results.append((wxid, remark or nick or wxid))
+        results.append((wxid, nick or wxid))  # use original WeChat nickname, not personal remark
     return results
 
 
@@ -455,6 +455,9 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
                 svr_id    = int(row[4]) if row[4] else 0
                 text, is_system = format_msg(row[2], local_type, voice_map=voice_map, ts=ts, nick_map=nick_map)
                 if text is None:
+                    continue
+                # Suppress WeChat's "update app" placeholder for unsupported message types
+                if "does not support this content" in text or "Update to the latest version" in text:
                     continue
                 if svr_id in seen:
                     continue
