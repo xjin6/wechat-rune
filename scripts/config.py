@@ -1,27 +1,29 @@
 """
-WeChat AI Bot configuration (Windows — Weixin xwechat_files format)
+WeChat / Weixin AI Bot configuration — cross-platform (Mac + Windows)
 
-The Windows Weixin app uses the SAME database schema as Mac WeChat.
-Key differences from Mac:
-  - Data path: search for xwechat_files directory on any Windows drive
-  - Key extraction: use extract_key_windows.py (ReadProcessMemory)
-  - Message sending: use Win32 API instead of AppleScript
+Database schema is identical on both platforms (xwechat_files format).
+Platform differences handled here:
+  Mac:     ~/Library/Containers/.../xwechat_files  |  osascript  |  sqlcipher binary
+  Windows: registry / drive search for xwechat_files  |  Win32 API  |  sqlcipher3 package
 
 All sensitive values are passed via environment variables.
-Copy .env.example to .env, fill in values, load with: python-dotenv or set commands.
 """
 import os
+import sys
 import hashlib
-import ctypes
-import string
 
 
 def _find_xwechat_files() -> str:
-    """
-    Auto-detect the xwechat_files root directory on any Windows drive.
-    Checks: registry FileSavePath → common locations → full drive search.
-    """
-    # 1. Check registry for user-configured path
+    """Auto-detect the xwechat_files root directory on the current platform."""
+
+    if sys.platform == 'darwin':
+        # Mac: fixed path inside the WeChat sandbox container
+        p = os.path.expanduser(
+            "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
+        )
+        return p if os.path.isdir(p) else ""
+
+    # Windows: registry → common locations → full drive search
     try:
         import winreg
         for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
@@ -43,17 +45,17 @@ def _find_xwechat_files() -> str:
     except ImportError:
         pass
 
-    # 2. Common default locations
-    common = [
+    # Common default locations
+    for p in [
         os.path.join(os.path.expanduser('~'), 'Documents', 'WeChat Files', 'xwechat_files'),
         os.path.join(os.path.expanduser('~'), 'Documents', 'xwechat_files'),
-    ]
-    for p in common:
+    ]:
         if os.path.isdir(p):
             return p
 
-    # 3. Full drive search (capped to reasonable depth)
+    # Full drive search (Windows)
     try:
+        import ctypes, string
         bitmask = ctypes.windll.kernel32.GetLogicalDrives()
         for letter in string.ascii_uppercase:
             if not (bitmask & 1):
@@ -64,9 +66,8 @@ def _find_xwechat_files() -> str:
             if not os.path.exists(drive):
                 continue
             for root, dirs, _ in os.walk(drive):
-                dirs[:] = [d for d in dirs
-                           if d not in ('Windows', '$Recycle.Bin', 'ProgramData',
-                                        'System Volume Information')]
+                dirs[:] = [d for d in dirs if d not in
+                           ('Windows', '$Recycle.Bin', 'ProgramData', 'System Volume Information')]
                 if 'xwechat_files' in dirs:
                     return os.path.join(root, 'xwechat_files')
                 if root.count(os.sep) > 5:
@@ -115,15 +116,18 @@ KEYS_FILE    = os.path.join(SCRIPT_DIR, "keys", "wechat_keys.json")
 DB_DIR       = os.path.join(PROJECT_ROOT, "db")
 DECRYPTED_DB = os.path.join(DB_DIR, "message_0.db")
 
-# xwechat_files root — auto-detected, or override via env var
+# xwechat_files root — auto-detected for current platform, or override via env var
 XWECHAT_FILES = os.environ.get("XWECHAT_FILES", _find_xwechat_files())
 
-# WeChat database path (same structure as Mac: <wxid>_xxx/db_storage/message/message_0.db)
+# Main message database (same path pattern on Mac and Windows)
 _default_db = os.path.join(XWECHAT_FILES, f"{MY_WXID}_c092",
                            "db_storage", "message", "message_0.db")
 WECHAT_DB_PATH  = os.environ.get("WECHAT_DB_PATH", _default_db)
 WECHAT_WAL_PATH = WECHAT_DB_PATH + "-wal"
 
-# SQLCipher binary path (fallback if sqlcipher3-binary package not installed)
-# choco install sqlcipher  OR  download from https://github.com/nalgeon/sqlean/releases
-SQLCIPHER_BIN = os.environ.get("SQLCIPHER_BIN", r"C:\sqlcipher\sqlcipher.exe")
+# SQLCipher binary — platform default, override via SQLCIPHER_BIN env var
+if sys.platform == 'darwin':
+    _default_sqlcipher = "/opt/homebrew/opt/sqlcipher/bin/sqlcipher"
+else:
+    _default_sqlcipher = r"C:\sqlcipher\sqlcipher.exe"
+SQLCIPHER_BIN = os.environ.get("SQLCIPHER_BIN", _default_sqlcipher)

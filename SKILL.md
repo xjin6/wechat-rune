@@ -1,68 +1,87 @@
 ---
-name: wechat-setup-windows
+name: wechat-setup
 description: >
-  Step-by-step guide to sync, decrypt, and export WeChat (微信/Weixin) chat history on Windows,
-  including voice message transcription (语音转文字) via Whisper and AI correction, then optionally
-  set up an AI auto-reply bot powered by Claude.
+  Step-by-step guide to sync, decrypt, and export WeChat (微信/Weixin) chat history on
+  macOS or Windows, including voice message transcription (语音转文字) via Whisper and
+  AI homophone correction, then optionally set up an AI auto-reply bot powered by Claude.
   Trigger this skill whenever the user wants to: export WeChat chat records to markdown,
   decrypt the WeChat database, extract WeChat encryption keys, transcribe WeChat voice
-  messages, set up a WeChat AI bot, or asks anything about accessing local WeChat data on Windows.
+  messages, correct voice transcriptions, set up a WeChat AI bot, or asks anything about
+  accessing local WeChat data on Mac or Windows.
 ---
 
-# WeChat Chat History Export & AI Bot Setup Guide (Windows)
+# WeChat Chat History Export & AI Bot Setup Guide
 
-Four steps. Wait for the user to confirm completion of each step before proceeding.
+Works on **macOS** and **Windows** from the same codebase. Four steps.
+Wait for the user to confirm completion of each step before proceeding.
 
-| Step | Description | Core Script |
-|------|-------------|-------------|
-| Step 1 | Sync phone chat history to PC | (Manual) |
-| Step 2 | Extract database encryption keys | `scripts\keys\extract_key_windows.py` |
-| Step 3 | Export chat history + voice transcription + correction | `scripts\export_chat.py` + `scripts\transcribe_voices.py` |
-| Step 4 | Set up AI auto-reply bot | `scripts\start.py` |
+| Step | Description | Mac script | Windows script |
+|------|-------------|-----------|----------------|
+| 1 | Sync phone chat history to computer | (Manual) | (Manual) |
+| 2 | Extract database encryption keys | `keys/extract_key2.py` (via LLDB) | `keys/extract_key_windows.py` |
+| 3 | Export chat + voice transcription + correction | `export_chat.py` + `transcribe_voices.py` | Same |
+| 4 | AI auto-reply bot | `start.py` | Same |
 
 ---
 
-## Step 1: Sync Phone Chat History to PC
+## Step 1: Sync Phone Chat History
 
-> Skip if you only need records already on the PC.
+> Skip if you only need records already on the computer.
 
-1. Log in to Weixin on PC
-2. Phone: WeChat → Settings → General → Chat History Migration & Backup → Migrate to Desktop
+**Mac & Windows:**
+1. Log in to WeChat / Weixin on the computer
+2. Phone → WeChat → Settings → General → Chat History Migration & Backup → Migrate to Desktop
 3. Select chats, same Wi-Fi, scan QR code
 
 ---
 
 ## Step 2: Extract Database Encryption Keys
 
-WeChat databases are encrypted with SQLCipher. Keys are extracted from Weixin.exe process memory.
-One extraction covers all databases for the current account.
+WeChat databases are encrypted with SQLCipher. Re-extract after switching devices or major WeChat upgrades.
 
-### Prerequisites
+### Mac
 
 ```bash
+# Install dependencies
+brew install sqlcipher ffmpeg
 pip install -r requirements.txt
-# Run as Administrator (required for ReadProcessMemory)
+
+# Compile SILK decoder (for voice transcription in Step 3)
+git clone https://github.com/kn007/silk-v3-decoder.git /tmp/silk-v3-decoder
+cd /tmp/silk-v3-decoder/silk && make
+
+# Re-sign WeChat to allow debugger
+sudo codesign --force --deep --sign - /Applications/WeChat.app
+
+# Extract (WeChat must be running and logged in)
+lldb -p $(pgrep -x WeChat) \
+     -o "script exec(open('scripts/keys/extract_key2.py').read())" \
+     -o "quit"
+
+# Verify
+python3 -c "import json; print(len(json.load(open('scripts/keys/wechat_keys.json'))), 'keys')"
 ```
 
-### Extraction
+> ~30–60 seconds. Reinstall WeChat from App Store afterward to restore original signature.
 
-Weixin must be running and logged in:
+**Mac permission issues:**
+- macOS 13+: System Settings → Privacy & Security → Developer Tools → enable Terminal
+- Still fails: Recovery Mode → `csrutil disable` → re-enable when done
+
+### Windows
 
 ```bash
-# Run as Administrator
+# Install dependencies
+pip install -r requirements.txt
+
+# Extract (run as Administrator; Weixin must be running and logged in)
 python scripts\keys\extract_key_windows.py
 
 # Verify
 python -c "import json; print(len(json.load(open('scripts/keys/wechat_keys.json'))), 'keys')"
 ```
 
-> ~5-30 seconds depending on memory size.
-
-### Permission Issues
-
-- Must run terminal as Administrator
-- If Weixin is not found: make sure it's running and logged in
-- Re-extract after major Weixin updates
+> ~5–30 seconds depending on memory size.
 
 ---
 
@@ -73,12 +92,12 @@ python -c "import json; print(len(json.load(open('scripts/keys/wechat_keys.json'
 Ask: "Whose chat history? Nickname or remark name? Private or group chat?"
 
 ```bash
-python scripts\export_chat.py --name "nickname"              # private chat
-python scripts\export_chat.py --name "group name" --group   # group chat
-python scripts\export_chat.py --name "nickname" --out path.md  # custom output
+python3 scripts/export_chat.py --name "nickname"              # private chat
+python3 scripts/export_chat.py --name "group name" --group   # group chat
+python3 scripts/export_chat.py --name "nickname" --out path.md
 ```
 
-Defaults to repo root directory (gitignored). Multiple matches → script prompts user to choose.
+Defaults to repo root (gitignored). Multiple matches → script prompts to choose.
 Display names use the contact's own WeChat nickname (not your personal remark).
 
 ### Voice Transcription (Optional)
@@ -86,21 +105,30 @@ Display names use the contact's own WeChat nickname (not your personal remark).
 Voice data lives in `media_0.db` as SILK BLOBs — no network download needed.
 
 ```bash
-# Transcribe (Windows: uses pilk + numpy, no ffmpeg required)
-python scripts\transcribe_voices.py --name "nickname"
+# Transcribe all voices for a contact
+python3 scripts/transcribe_voices.py --name "nickname"
+python3 scripts/transcribe_voices.py --name "nickname" --model medium   # higher accuracy
 
-# Re-export with transcriptions
-python scripts\export_chat.py --name "nickname" --voice-json nickname_voice_map.json
+# Re-export with transcriptions embedded
+python3 scripts/export_chat.py --name "nickname" --voice-json nickname_voice_map.json
 ```
 
-Supports resumable runs, real-time progress, auto-save every 50 entries.
-Option: `--model medium` for higher accuracy (default `small`).
+Supports resumable runs, real-time progress, checkpoint every 50 entries.
 
-### Voice Correction (Part of this skill — no extra command needed)
+**Voice pipeline comparison:**
 
-After transcription, Claude reads `voice_map.json` directly and corrects obvious homophone errors
-(same音字, mishears, audio noise). Corrections are stored inline and rendered as HTML comments
-in the final Markdown (invisible when rendered, visible to AI):
+| Stage | Mac | Windows |
+|-------|-----|---------|
+| SILK decode | `silk-v3-decoder` compiled binary | `pilk` pip package |
+| Audio conversion | ffmpeg → WAV file | numpy resample → float32 array |
+| Whisper input | file path | numpy array (no ffmpeg needed) |
+
+### Voice Correction (Claude does this directly — no extra command)
+
+After transcription, Claude reads `voice_map.json`, identifies and fixes homophone errors
+(Whisper common mistakes in Mandarin), and writes corrections back inline.
+Corrections appear as HTML comments in the final Markdown — invisible when rendered,
+visible to AI:
 
 ```
 [语音 10s] 来清华玩 <!-- correction: 精华→清华 -->
@@ -108,16 +136,16 @@ in the final Markdown (invisible when rendered, visible to AI):
 
 ### Supported Message Types
 
-| Type | Output Example |
-|------|---------------|
-| Text | `hi你好。` |
+| Type | Output |
+|------|--------|
+| Text | plain text |
 | Image | `[图片]` |
 | Voice | `[语音 9s] transcribed text` |
 | Video | `[视频 23s]` |
 | Sticker | `[表情包]` |
-| Official Account | `[公众号 \| AccountName] article title` |
-| Mini Program | `[小程序 \| AppName] title` |
-| File | `[文件] filename.pdf` |
+| Official Account | `[公众号 \| Name] title` |
+| Mini Program | `[小程序 \| Name] title` |
+| File | `[文件] filename` |
 | Transfer | `[转账 ¥0.68]` |
 | Red Packet | `[红包 note]` |
 | Link | `[链接] title` |
@@ -129,19 +157,29 @@ in the final Markdown (invisible when rendered, visible to AI):
 
 ## Step 4 (Optional): AI Auto-Reply Bot
 
-### Setup
+### Mac Setup
 
-1. **Conversations**: Ask who to monitor, add to `.watch` file
+Enable accessibility: System Settings → Privacy & Security → Accessibility → enable Terminal
+
+### Windows Setup
+
+WeChat window must remain open; bot uses keyboard simulation to send replies.
+
+### Configuration (both platforms)
+
+1. **Conversations**: Ask who to monitor, look up wxid, write to `.watch`
 2. **API Key**: Ask for Anthropic API Key (`sk-ant-...`), write to `.apikey`
-3. **Trigger words**: Customize via `.env` (default trigger words in `config.py`)
+3. **Trigger words**: Customize via `.env` (defaults in `config.py`)
 
 ### Launch
 
 ```bash
-python scripts\start.py
+python3 scripts/start.py
+# or specify conversations directly:
+python3 scripts/start.py "group name" "contact name"
 ```
 
-Optional dashboard: `python scripts\dashboard.py` (localhost:7788)
+Optional dashboard: `python3 scripts/dashboard.py` → http://localhost:7788
 
 Stop: `Ctrl+C`
 
@@ -151,55 +189,59 @@ Stop: `Ctrl+C`
 
 | Problem | Solution |
 |---------|----------|
-| No key in `wechat_keys.json` | Re-extract (run as Administrator) |
-| Empty export | Check wxid; verify keys were extracted while Weixin was running |
-| Key extraction finds 0 keys | Weixin must be running and logged in |
-| WinError 2 in transcription | Normal — handled automatically via numpy bypass |
-| `sqlcipher3` errors | Run: `pip install sqlcipher3` |
-| Voice in Traditional Chinese | Change `initial_prompt` in transcribe_voices.py |
-| No key for `media_0.db` | Re-extract while Weixin is running |
-| Bot can't send messages | WeChat window must be open and focused on target chat |
-| Dashboard shows 0 vectors | Run `start.py` first to vectorize history |
+| No keys extracted | Re-extract (must run as Admin on Windows / with LLDB on Mac) |
+| Empty export | Check wxid; re-extract keys while WeChat is running |
+| LLDB attach fails (Mac) | Developer Tools permission, or disable SIP |
+| WinError 2 in transcription | Handled automatically via numpy bypass |
+| `sqlcipher3` errors | `pip install sqlcipher3` |
+| AppleScript can't send (Mac) | Accessibility permission for Terminal |
+| Bot can't send (Windows) | WeChat window must be open |
+| Voice in Traditional Chinese | Change `initial_prompt` in `transcribe_voices.py` |
+| No key for `media_0.db` | Re-extract while WeChat is running |
+| DB corruption dialog | Cancel to ignore, or Repair + re-extract |
+| Sender reversed | Re-extract keys |
 
 ---
 
 ## Technical Reference
 
-### Database Structure (same as Mac)
+### Database Structure (identical on Mac and Windows)
 
 | Database | Contents |
 |----------|----------|
-| `message_N.db` | Chat messages (table = `Msg_` + MD5(wxid)) |
+| `message_N.db` | Chat messages — table `Msg_` + MD5(wxid) |
 | `contact.db` | Contacts (nick_name, remark, wxid) |
-| `media_0.db` | Voice data (`VoiceInfo` table, SILK BLOBs) |
+| `media_0.db` | Voice data — `VoiceInfo` table, SILK BLOBs |
 | Other | Stickers, favorites, Moments, etc. |
 
-### Data Location
+### Data Path Detection
 
-Windows: auto-detected via registry → common paths → full drive search for `xwechat_files\`
-Default: `%USERPROFILE%\Documents\WeChat Files\<wxid>_xxx\db_storage\`
+| Platform | Method |
+|----------|--------|
+| Mac | Fixed: `~/Library/Containers/com.tencent.xinWeChat/.../xwechat_files` |
+| Windows | Registry (`FileSavePath`) → common paths → full drive search for `xwechat_files` |
 
-### Voice Pipeline Comparison
+Override either platform with `XWECHAT_FILES` environment variable.
 
-| Stage | Mac | Windows |
-|-------|-----|---------|
-| SILK decode | `silk-v3-decoder` (compiled C binary) | `pilk` (pip package) |
-| Audio conversion | `ffmpeg` → WAV file | `numpy` → float32 array @ 16kHz |
-| Whisper input | file path | numpy array (bypasses ffmpeg) |
-| ffmpeg needed | Yes (`brew install ffmpeg`) | No (imageio-ffmpeg optional) |
+### Key Extraction
+
+| | Mac | Windows |
+|---|---|---|
+| Method | LLDB debugger + Mach kernel API | ReadProcessMemory Win32 API |
+| Requires | SIP disabled or Developer Tools | Administrator privileges |
+| Memory pattern | `x'<64 hex chars>'` | Same |
+| HMAC verification | SHA-512 | SHA-512 (SHA-1 fallback) |
+
+### Sender
+
+| | Mac | Windows |
+|---|---|---|
+| Clipboard | `pbcopy` | ctypes `CF_UNICODETEXT` |
+| Send | AppleScript (`osascript`) | `keybd_event` (Ctrl+V, Enter) |
 
 ### Sender Identification
 
 `Name2Id.rowid` → `real_sender_id`. Display names from `contact.db` `nick_name` (not remark).
-
-### Key Extraction Method
-
-| Mac | Windows |
-|-----|---------|
-| LLDB debugger + Mach kernel API | `ReadProcessMemory` Win32 API |
-| Requires SIP disabled or dev tools | Requires Administrator privileges |
-| Scans for `x'<64 hex>'` pattern in memory | Same pattern scan |
-| HMAC-SHA512 verification | HMAC-SHA512 + SHA1 fallback |
 
 ---
 
@@ -207,10 +249,10 @@ Default: `%USERPROFILE%\Documents\WeChat Files\<wxid>_xxx\db_storage\`
 
 | Script | Purpose | Step |
 |--------|---------|------|
-| `scripts\keys\extract_key_windows.py` | Extract SQLCipher keys via Win32 memory scan | 2 |
-| `scripts\export_chat.py` | Export chat to Markdown | 3 |
-| `scripts\transcribe_voices.py` | Batch voice transcription | 3 |
-| `scripts\start.py` | Launch AI bot | 4 |
-| `scripts\bot.py` | Bot main process (DB monitor + Claude) | 4 |
-| `scripts\config.py` | Config loader (env, API key, triggers) | 4 |
-| `scripts\dashboard.py` | Web dashboard (localhost:7788) | 4 |
+| `scripts/keys/extract_key2.py` | Mac: extract keys via LLDB | 2 |
+| `scripts/keys/extract_key_windows.py` | Windows: extract keys via Win32 memory scan | 2 |
+| `scripts/export_chat.py` | Export chat to Markdown | 3 |
+| `scripts/transcribe_voices.py` | Batch voice transcription (Mac + Windows) | 3 |
+| `scripts/start.py` | Launch AI bot | 4 |
+| `scripts/bot.py` | Bot main process | 4 |
+| `scripts/dashboard.py` | Web dashboard — localhost:7788 | 4 |

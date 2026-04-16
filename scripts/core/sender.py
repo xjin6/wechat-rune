@@ -1,32 +1,24 @@
 """
-Send WeChat messages on Windows.
+Send WeChat messages — cross-platform (Mac + Windows)
 
-Strategy:
-  1. Copy the reply text to the clipboard (using ctypes CF_UNICODETEXT for full Unicode support).
-  2. Bring the WeChat window to the foreground.
-  3. Simulate Ctrl+A → Delete → Ctrl+V → Enter to clear the input box, paste, and send.
-
-Requirements: WeChat PC must be running and the target conversation must be open.
-No extra Python packages needed — uses only the built-in ctypes module.
+Mac:     pbcopy to clipboard  +  AppleScript (osascript) to paste & send
+Windows: ctypes clipboard     +  Win32 keybd_event to paste & send
 """
-import ctypes
-import ctypes.wintypes
+import sys
 import time
 import re
 import threading
 
-_send_lock = threading.Lock()   # One send at a time
+_send_lock = threading.Lock()
 
 
-# ── Text cleanup helpers ──────────────────────────────────────────
+# ── Text cleanup (shared) ─────────────────────────────────────────
 
 def strip_blank_lines(text: str) -> str:
-    """Collapse consecutive blank lines into a single newline."""
     return re.sub(r'\n{2,}', '\n', text).strip()
 
 
 def strip_markdown(text: str) -> str:
-    """Strip markdown formatting not supported by WeChat."""
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'\*(.+?)\*',     r'\1', text)
     text = re.sub(r'__(.+?)__',     r'\1', text)
@@ -38,43 +30,118 @@ def strip_markdown(text: str) -> str:
     return text.strip()
 
 
-# ── Windows clipboard ─────────────────────────────────────────────
+# ── Mac implementation ────────────────────────────────────────────
 
-_user32   = ctypes.windll.user32
-_kernel32 = ctypes.windll.kernel32
+def _send_mac(message: str) -> bool:
+    import subprocess
+    subprocess.run(["pbcopy"], input=message.encode("utf-8"))
+    time.sleep(0.1)
+    script = '''
+tell application "System Events"
+    set frontmost of process "WeChat" to true
+    tell process "WeChat"
+        keystroke "a" using {command down}
+        key code 51
+        keystroke "v" using {command down}
+        delay 0.05
+        keystroke return
+    end tell
+end tell
+'''
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    return r.returncode == 0
 
-CF_UNICODETEXT   = 13
-GMEM_MOVEABLE    = 0x0002
-KEYEVENTF_KEYUP  = 0x0002
+
+def _navigate_to_mac(chat_name: str):
+    import subprocess
+    script = f'''
+tell application "WeChat"
+    activate
+end tell
+delay 0.5
+tell application "System Events"
+    tell process "WeChat"
+        keystroke "f" using {{command down}}
+        delay 0.5
+        keystroke "{chat_name}"
+        delay 1
+        keystroke return
+        delay 0.5
+        key code 53
+    end tell
+end tell
+'''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+    time.sleep(0.5)
 
 
-def _copy_to_clipboard(text: str):
-    """Write text to the Windows clipboard as Unicode."""
+# ── Windows implementation ────────────────────────────────────────
+
+def _copy_to_clipboard_win(text: str):
+    import ctypes
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE  = 0x0002
     encoded = (text + '\0').encode('utf-16-le')
-    h = _kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
-    if not h:
-        return
-    p = _kernel32.GlobalLock(h)
+    h = ctypes.windll.kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+    p = ctypes.windll.kernel32.GlobalLock(h)
     ctypes.memmove(p, encoded, len(encoded))
-    _kernel32.GlobalUnlock(h)
-    _user32.OpenClipboard(0)
-    _user32.EmptyClipboard()
-    _user32.SetClipboardData(CF_UNICODETEXT, h)
-    _user32.CloseClipboard()
+    ctypes.windll.kernel32.GlobalUnlock(h)
+    ctypes.windll.user32.OpenClipboard(0)
+    ctypes.windll.user32.EmptyClipboard()
+    ctypes.windll.user32.SetClipboardData(CF_UNICODETEXT, h)
+    ctypes.windll.user32.CloseClipboard()
 
 
-# ── Window helpers ────────────────────────────────────────────────
-
-def _find_wechat_hwnd() -> int:
-    """Return the handle of the WeChat main window, or 0 if not found."""
-    hwnd = _user32.FindWindowW("WeChatMainWndForPC", None)
+def _find_wechat_hwnd_win():
+    import ctypes
+    hwnd = ctypes.windll.user32.FindWindowW("WeChatMainWndForPC", None)
     if not hwnd:
-        hwnd = _user32.FindWindowW(None, "微信")
+        hwnd = ctypes.windll.user32.FindWindowW(None, "微信")
     return hwnd
 
 
-def _keybd(vk: int, up: bool = False):
-    _user32.keybd_event(vk, 0, KEYEVENTF_KEYUP if up else 0, 0)
+def _keybd_win(vk: int, up: bool = False):
+    import ctypes
+    ctypes.windll.user32.keybd_event(vk, 0, 0x0002 if up else 0, 0)
+
+
+def _send_win(message: str) -> bool:
+    import ctypes
+    _copy_to_clipboard_win(message)
+    time.sleep(0.1)
+    hwnd = _find_wechat_hwnd_win()
+    if not hwnd:
+        print("[!] WeChat window not found — is WeChat running?", flush=True)
+        return False
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    time.sleep(0.15)
+    VK_CTRL, VK_A, VK_V, VK_DEL, VK_ENTER = 0x11, 0x41, 0x56, 0x2E, 0x0D
+    _keybd_win(VK_CTRL);  _keybd_win(VK_A);   _keybd_win(VK_A,    up=True); _keybd_win(VK_CTRL, up=True)
+    time.sleep(0.05)
+    _keybd_win(VK_DEL);   _keybd_win(VK_DEL,  up=True)
+    time.sleep(0.05)
+    _keybd_win(VK_CTRL);  _keybd_win(VK_V);   _keybd_win(VK_V,    up=True); _keybd_win(VK_CTRL, up=True)
+    time.sleep(0.05)
+    _keybd_win(VK_ENTER); _keybd_win(VK_ENTER, up=True)
+    return True
+
+
+def _navigate_to_win(chat_name: str):
+    import ctypes
+    hwnd = _find_wechat_hwnd_win()
+    if not hwnd:
+        return
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    time.sleep(0.3)
+    _copy_to_clipboard_win(chat_name)
+    VK_CTRL, VK_F, VK_V, VK_ENTER, VK_ESC = 0x11, 0x46, 0x56, 0x0D, 0x1B
+    _keybd_win(VK_CTRL); _keybd_win(VK_F);   _keybd_win(VK_F,     up=True); _keybd_win(VK_CTRL, up=True)
+    time.sleep(0.5)
+    _keybd_win(VK_CTRL); _keybd_win(VK_V);   _keybd_win(VK_V,     up=True); _keybd_win(VK_CTRL, up=True)
+    time.sleep(0.8)
+    _keybd_win(VK_ENTER); _keybd_win(VK_ENTER, up=True)
+    time.sleep(0.5)
+    _keybd_win(VK_ESC);  _keybd_win(VK_ESC,   up=True)
 
 
 # ── Public API ────────────────────────────────────────────────────
@@ -84,77 +151,14 @@ def send(message: str) -> bool:
     with _send_lock:
         message = strip_markdown(message)
         message = strip_blank_lines(message)
-        _copy_to_clipboard(message)
-
-    time.sleep(0.1)
-
-    try:
-        hwnd = _find_wechat_hwnd()
-        if not hwnd:
-            print("[!] WeChat window not found — is WeChat running?", flush=True)
-            return False
-
-        # Bring WeChat to foreground
-        _user32.SetForegroundWindow(hwnd)
-        time.sleep(0.15)
-
-        VK_CTRL   = 0x11
-        VK_A      = 0x41
-        VK_V      = 0x56
-        VK_DEL    = 0x2E
-        VK_RETURN = 0x0D
-
-        # Ctrl+A  — select all text in input box
-        _keybd(VK_CTRL); _keybd(VK_A); _keybd(VK_A, up=True); _keybd(VK_CTRL, up=True)
-        time.sleep(0.05)
-        # Delete  — clear selection
-        _keybd(VK_DEL); _keybd(VK_DEL, up=True)
-        time.sleep(0.05)
-        # Ctrl+V  — paste
-        _keybd(VK_CTRL); _keybd(VK_V); _keybd(VK_V, up=True); _keybd(VK_CTRL, up=True)
-        time.sleep(0.05)
-        # Enter   — send
-        _keybd(VK_RETURN); _keybd(VK_RETURN, up=True)
-        return True
-
-    except Exception as e:
-        print(f"[!] send() failed: {e}", flush=True)
-        return False
+        if sys.platform == 'win32':
+            return _send_win(message)
+        return _send_mac(message)
 
 
 def navigate_to(chat_name: str):
-    """Use Ctrl+F to search for and switch to the specified conversation."""
-    try:
-        hwnd = _find_wechat_hwnd()
-        if not hwnd:
-            return
-
-        _user32.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
-
-        VK_CTRL   = 0x11
-        VK_F      = 0x46
-        VK_V      = 0x56
-        VK_RETURN = 0x0D
-        VK_ESC    = 0x1B
-
-        # Copy chat name to clipboard and open search
-        _copy_to_clipboard(chat_name)
-
-        _keybd(VK_CTRL); _keybd(VK_F); _keybd(VK_F, up=True); _keybd(VK_CTRL, up=True)
-        time.sleep(0.5)
-
-        # Paste the chat name into the search box
-        _keybd(VK_CTRL); _keybd(VK_V); _keybd(VK_V, up=True); _keybd(VK_CTRL, up=True)
-        time.sleep(0.8)
-
-        # Confirm selection
-        _keybd(VK_RETURN); _keybd(VK_RETURN, up=True)
-        time.sleep(0.5)
-
-        # Close search overlay
-        _keybd(VK_ESC); _keybd(VK_ESC, up=True)
-        time.sleep(0.3)
-
-    except Exception as e:
-        print(f"[!] navigate_to() failed: {e}", flush=True)
+    """Search for and switch to the specified WeChat conversation."""
+    if sys.platform == 'win32':
+        _navigate_to_win(chat_name)
+    else:
+        _navigate_to_mac(chat_name)
