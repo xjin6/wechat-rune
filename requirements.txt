@@ -14,6 +14,11 @@ openai-whisper
 # Windows SILK audio decoder (replaces the compiled silk-v3-decoder binary on Mac)
 pilk
 
+# Auto-downloads ffmpeg binary for the current platform (Windows/Mac/Linux)
+# Whisper uses ffmpeg internally; this ensures it's available without a system install
+# Mac users can also use: brew install ffmpeg
+imageio-ffmpeg
+
 # ── Step 4: AI bot + voice correction (optional) ─────────────────
 anthropic
 watchdog

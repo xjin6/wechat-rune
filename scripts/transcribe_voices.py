@@ -34,46 +34,68 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from export_chat import sqlcipher_query, find_keys_file, detect_wxid_and_db_dir, search_contacts
 
 
+def _ensure_ffmpeg():
+    """Inject imageio-ffmpeg binary into PATH so Whisper can find ffmpeg automatically."""
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+        if ffmpeg_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+    except ImportError:
+        pass  # Fall back to system ffmpeg (e.g. brew install ffmpeg on Mac)
+
+
+_ensure_ffmpeg()
+
+
 # ── SILK → WAV (platform-specific) ───────────────────────────────
 
-def _silk_to_wav_windows(voice_bytes: bytes) -> tuple[str | None, str]:
-    """Windows: SILK → PCM via pilk, then PCM → WAV via wave module (no ffmpeg needed)."""
+def _silk_to_audio_windows(voice_bytes: bytes):
+    """
+    Windows: SILK → float32 numpy array at 16kHz, no ffmpeg needed.
+    Returns (audio_array, tmp_dir) or (None, tmp_dir) on failure.
+    Whisper accepts float32 numpy arrays directly, bypassing its ffmpeg loader.
+    """
     try:
         import pilk
-    except ImportError:
-        print("[!] pilk not installed. Run: pip install pilk", flush=True)
+        import numpy as np
+    except ImportError as e:
+        print(f"[!] missing package: {e}. Run: pip install pilk numpy", flush=True)
         return None, ""
 
     data = voice_bytes[1:] if voice_bytes and voice_bytes[0] == 0x02 else voice_bytes
     tmp  = tempfile.mkdtemp()
     silk_path = os.path.join(tmp, "v.silk")
     pcm_path  = os.path.join(tmp, "v.pcm")
-    wav_path  = os.path.join(tmp, "v.wav")
 
     with open(silk_path, "wb") as f:
         f.write(data)
 
     try:
-        pilk.decode(silk_path, pcm_path)  # SILK → raw PCM (s16le, 24kHz, mono)
+        pilk.decode(silk_path, pcm_path)     # SILK → raw s16le PCM at 24kHz
         if not os.path.exists(pcm_path) or os.path.getsize(pcm_path) == 0:
             return None, tmp
 
-        import wave
         with open(pcm_path, "rb") as f:
             pcm_data = f.read()
-        with wave.open(wav_path, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)   # 16-bit
-            w.setframerate(24000)
-            w.writeframes(pcm_data)
 
-        if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
-            return None, tmp
+        # s16le → float32 normalised to [-1, 1]
+        audio = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+        # Resample 24kHz → 16kHz (Whisper's expected sample rate) via linear interpolation
+        src_sr, tgt_sr = 24000, 16000
+        tgt_len = int(len(audio) * tgt_sr / src_sr)
+        audio = np.interp(
+            np.linspace(0, len(audio) - 1, tgt_len),
+            np.arange(len(audio)),
+            audio
+        ).astype(np.float32)
+
+        return audio, tmp
     except Exception as e:
         print(f"  silk decode error: {e}", flush=True)
         return None, tmp
-
-    return wav_path, tmp
 
 
 def _find_decoder_mac() -> str | None:
@@ -113,9 +135,14 @@ def _silk_to_wav_mac(voice_bytes: bytes, decoder: str) -> tuple[str | None, str]
     return wav_path, tmp
 
 
-def silk_to_wav(voice_bytes: bytes, decoder=None) -> tuple[str | None, str]:
+def silk_to_audio(voice_bytes: bytes, decoder=None):
+    """
+    Decode SILK audio to a form Whisper can transcribe.
+    Windows: returns (numpy float32 array @ 16kHz, tmp_dir)
+    Mac:     returns (WAV file path, tmp_dir)
+    """
     if sys.platform == "win32":
-        return _silk_to_wav_windows(voice_bytes)
+        return _silk_to_audio_windows(voice_bytes)
     return _silk_to_wav_mac(voice_bytes, decoder)
 
 
@@ -315,9 +342,9 @@ def main():
 
         dt = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
         try:
-            wav_path, tmp = silk_to_wav(bytes.fromhex(hex_data), decoder)
-            if wav_path:
-                result = model.transcribe(wav_path, language=None, fp16=False,
+            audio, tmp = silk_to_audio(bytes.fromhex(hex_data), decoder)
+            if audio is not None:
+                result = model.transcribe(audio, language=None, fp16=False,
                                           initial_prompt="以下是普通话的句子。")
                 text = result["text"].strip()
                 voice_map[ts_key] = {"text": text}
