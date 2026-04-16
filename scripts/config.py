@@ -1,22 +1,89 @@
 """
-WeChat AI Bot configuration (Windows)
+WeChat AI Bot configuration (Windows — Weixin xwechat_files format)
 
-All sensitive values are passed via environment variables; do not hard-code them here.
-Copy .env.example to .env, fill in real values, then run: set /p < .env  (or use dotenv)
+The Windows Weixin app uses the SAME database schema as Mac WeChat.
+Key differences from Mac:
+  - Data path: search for xwechat_files directory on any Windows drive
+  - Key extraction: use extract_key_windows.py (ReadProcessMemory)
+  - Message sending: use Win32 API instead of AppleScript
+
+All sensitive values are passed via environment variables.
+Copy .env.example to .env, fill in values, load with: python-dotenv or set commands.
 """
 import os
 import hashlib
+import ctypes
+import string
+
+
+def _find_xwechat_files() -> str:
+    """
+    Auto-detect the xwechat_files root directory on any Windows drive.
+    Checks: registry FileSavePath → common locations → full drive search.
+    """
+    # 1. Check registry for user-configured path
+    try:
+        import winreg
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for key_path in (r'Software\Tencent\WeChat', r'Software\Tencent\Weixin'):
+                try:
+                    key = winreg.OpenKey(hive, key_path)
+                    for val_name in ('FileSavePath', 'FileStoragePath', 'DataPath'):
+                        try:
+                            val, _ = winreg.QueryValueEx(key, val_name)
+                            candidate = os.path.join(val, 'xwechat_files')
+                            if os.path.isdir(candidate):
+                                winreg.CloseKey(key)
+                                return candidate
+                        except OSError:
+                            pass
+                    winreg.CloseKey(key)
+                except OSError:
+                    pass
+    except ImportError:
+        pass
+
+    # 2. Common default locations
+    common = [
+        os.path.join(os.path.expanduser('~'), 'Documents', 'WeChat Files', 'xwechat_files'),
+        os.path.join(os.path.expanduser('~'), 'Documents', 'xwechat_files'),
+    ]
+    for p in common:
+        if os.path.isdir(p):
+            return p
+
+    # 3. Full drive search (capped to reasonable depth)
+    try:
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        for letter in string.ascii_uppercase:
+            if not (bitmask & 1):
+                bitmask >>= 1
+                continue
+            bitmask >>= 1
+            drive = letter + ':/'
+            if not os.path.exists(drive):
+                continue
+            for root, dirs, _ in os.walk(drive):
+                dirs[:] = [d for d in dirs
+                           if d not in ('Windows', '$Recycle.Bin', 'ProgramData',
+                                        'System Volume Information')]
+                if 'xwechat_files' in dirs:
+                    return os.path.join(root, 'xwechat_files')
+                if root.count(os.sep) > 5:
+                    dirs.clear()
+    except Exception:
+        pass
+
+    return ""
+
 
 # ── Identity ─────────────────────────────────────────────────────
-# Your WeChat wxid (the folder name under WeChat Files, e.g. "wxid_xxxxxxxx")
 MY_WXID = os.environ.get("WECHAT_MY_WXID", "your_wxid_here")
 
 # ── Watched conversations ────────────────────────────────────────
-# Group ID (xxxxx@chatroom) or personal wxid, comma-separated
-_watch_env = os.environ.get("WECHAT_WATCH_IDS", "")
-WATCH_IDS = [w.strip() for w in _watch_env.split(",") if w.strip()] if _watch_env else []
-# Windows: "tables" are conversation IDs (StrTalker values), not DB table names
-WATCH_TABLES = WATCH_IDS
+_watch_env  = os.environ.get("WECHAT_WATCH_IDS", "")
+WATCH_IDS   = [w.strip() for w in _watch_env.split(",") if w.strip()] if _watch_env else []
+WATCH_TABLES = ["Msg_" + hashlib.md5(wid.encode()).hexdigest() for wid in WATCH_IDS]
 
 # ── Trigger words ────────────────────────────────────────────────
 BOT_TRIGGERS = os.environ.get("BOT_TRIGGERS", "小昕,/xin").split(",")
@@ -42,34 +109,21 @@ AI_SYSTEM_PROMPT = (
 )
 
 # ── Paths ────────────────────────────────────────────────────────
-SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))   # scripts/
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)                  # project root
+SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 KEYS_FILE    = os.path.join(SCRIPT_DIR, "keys", "wechat_keys.json")
 DB_DIR       = os.path.join(PROJECT_ROOT, "db")
+DECRYPTED_DB = os.path.join(DB_DIR, "message_0.db")
 
-# Decrypted DB cache paths (written by decrypt_db.py, used for fast queries)
-DECRYPTED_MSG_DB     = os.path.join(DB_DIR, "MSG0.db")
-DECRYPTED_CONTACT_DB = os.path.join(DB_DIR, "MicroMsg.db")
+# xwechat_files root — auto-detected, or override via env var
+XWECHAT_FILES = os.environ.get("XWECHAT_FILES", _find_xwechat_files())
 
-# Windows WeChat data root: %USERPROFILE%\Documents\WeChat Files\<wxid>\
-WECHAT_FILES_ROOT = os.environ.get(
-    "WECHAT_FILES_ROOT",
-    os.path.join(os.path.expanduser("~"), "Documents", "WeChat Files")
-)
-
-# Main message database — watch this for new messages
-WECHAT_DB_PATH = os.environ.get(
-    "WECHAT_DB_PATH",
-    os.path.join(WECHAT_FILES_ROOT, MY_WXID, "Msg", "MSG0.db")
-)
+# WeChat database path (same structure as Mac: <wxid>_xxx/db_storage/message/message_0.db)
+_default_db = os.path.join(XWECHAT_FILES, f"{MY_WXID}_c092",
+                           "db_storage", "message", "message_0.db")
+WECHAT_DB_PATH  = os.environ.get("WECHAT_DB_PATH", _default_db)
 WECHAT_WAL_PATH = WECHAT_DB_PATH + "-wal"
 
-# Contact / group info database
-WECHAT_CONTACT_DB = os.environ.get(
-    "WECHAT_CONTACT_DB",
-    os.path.join(WECHAT_FILES_ROOT, MY_WXID, "Msg", "MicroMsg.db")
-)
-
 # SQLCipher binary path (fallback if sqlcipher3-binary package not installed)
-# Download: https://github.com/nalgeon/sqlean/releases  or  choco install sqlcipher
+# choco install sqlcipher  OR  download from https://github.com/nalgeon/sqlean/releases
 SQLCIPHER_BIN = os.environ.get("SQLCIPHER_BIN", r"C:\sqlcipher\sqlcipher.exe")

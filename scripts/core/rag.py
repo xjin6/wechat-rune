@@ -101,19 +101,68 @@ def _is_chat_member(person_wxid: str, chat_wxid: str) -> bool:
 
 
 def _load_group_members(chatroom_wxid: str) -> set:
-    """Load group member wxids from the ChatRoom table in MicroMsg.db (Windows)."""
-    from core.decrypt import query_contact
+    """Load group member wxids from contact.db (xwechat_files schema, same as Mac)."""
+    import json, os, tempfile, subprocess
+    from config import KEYS_FILE, SQLCIPHER_BIN, WECHAT_DB_PATH
 
-    rows = query_contact(
-        f"SELECT MemberList FROM ChatRoom WHERE ChatRoomName = '{chatroom_wxid}' LIMIT 1;"
+    contact_db = WECHAT_DB_PATH.replace(
+        "/message/message_0.db", "/contact/contact.db"
+    ).replace(
+        "\\message\\message_0.db", "\\contact\\contact.db"
     )
+    key = next((v for k, v in json.load(open(KEYS_FILE)).items()
+                if "contact/contact.db" in k.replace("\\", "/")), "")
+    if not key:
+        return set()
+
+    sql = (
+        f"SELECT cm.member_id, c.username FROM chatroom_member cm "
+        f"JOIN contact c2 ON c2.id = cm.room_id AND c2.username = '{chatroom_wxid}' "
+        f"JOIN contact c ON c.id = cm.member_id;"
+    )
+
+    # Try sqlcipher3 package first
+    try:
+        import sqlcipher3 as _sc
+        conn = _sc.connect(contact_db)
+        conn.execute(f"PRAGMA key = \"x'{key}'\"")
+        conn.execute("PRAGMA cipher_page_size = 4096")
+        rows = conn.execute(sql).fetchall()
+        conn.close()
+        members = set()
+        for row in rows:
+            if len(row) >= 2 and row[1]:
+                members.add(str(row[1]).strip())
+        return members
+    except Exception:
+        pass
+
+    # Binary fallback
+    if not os.path.exists(SQLCIPHER_BIN):
+        return set()
+    fd, tmp = tempfile.mkstemp(suffix='.sql', prefix='wm_')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write('PRAGMA key = "x\'%s\'";\n' % key)
+            f.write('PRAGMA cipher_page_size = 4096;\n')
+            f.write('.separator "|||"\n')
+            f.write(sql + '\n')
+        r = subprocess.run(
+            [SQLCIPHER_BIN, contact_db],
+            stdin=open(tmp, encoding='utf-8'),
+            capture_output=True, text=True, timeout=5
+        )
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     members = set()
-    for row in rows:
-        if row and row[0]:
-            for wxid in row[0].split(';'):
-                wxid = wxid.strip()
-                if wxid:
-                    members.add(wxid)
+    for line in r.stdout.splitlines():
+        if '|||' in line:
+            parts = line.split('|||')
+            if len(parts) >= 2 and parts[1].strip():
+                members.add(parts[1].strip())
     return members
 
 

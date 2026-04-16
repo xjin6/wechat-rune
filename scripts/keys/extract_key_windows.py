@@ -57,16 +57,58 @@ class MEMORY_BASIC_INFORMATION(ctypes.Structure):
 
 # ── Database file collection ──────────────────────────────────────
 
+def _find_xwechat_files() -> str:
+    """Locate the xwechat_files directory on any Windows drive."""
+    import ctypes, string, winreg
+
+    # Registry first
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for key_path in (r'Software\Tencent\WeChat', r'Software\Tencent\Weixin'):
+            try:
+                key = winreg.OpenKey(hive, key_path)
+                for val_name in ('FileSavePath', 'FileStoragePath', 'DataPath'):
+                    try:
+                        val, _ = winreg.QueryValueEx(key, val_name)
+                        candidate = os.path.join(val, 'xwechat_files')
+                        if os.path.isdir(candidate):
+                            winreg.CloseKey(key)
+                            return candidate
+                    except OSError:
+                        pass
+                winreg.CloseKey(key)
+            except OSError:
+                pass
+
+    # Drive search
+    bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+    for letter in string.ascii_uppercase:
+        if not (bitmask & 1):
+            bitmask >>= 1
+            continue
+        bitmask >>= 1
+        drive = letter + ':/'
+        if not os.path.exists(drive):
+            continue
+        for root, dirs, _ in os.walk(drive):
+            dirs[:] = [d for d in dirs if d not in
+                       ('Windows', '$Recycle.Bin', 'ProgramData', 'System Volume Information')]
+            if 'xwechat_files' in dirs:
+                return os.path.join(root, 'xwechat_files')
+            if root.count(os.sep) > 5:
+                dirs.clear()
+    return ""
+
+
 def collect_db_files() -> tuple[list, dict]:
     """
-    Walk WeChat Files and collect all candidate encrypted databases.
+    Walk the xwechat_files directory and collect all candidate encrypted databases.
     Returns (db_files, salt_to_dbs) where:
       db_files   = [(rel_path, abs_path, size, salt_hex, page1_bytes), ...]
       salt_to_dbs = {salt_hex: [rel_path, ...]}
     """
-    base = os.path.join(os.path.expanduser("~"), "Documents", "WeChat Files")
+    base = _find_xwechat_files()
     if not os.path.isdir(base):
-        print(f"[!] WeChat Files not found: {base}")
+        print(f"[!] xwechat_files not found. Set XWECHAT_FILES env var.")
         return [], {}
 
     db_files  = []
