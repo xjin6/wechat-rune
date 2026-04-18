@@ -1,179 +1,94 @@
-[English](README.md) | [中文](README_CN.md)
+# wechat-rune
 
-# wechat-export-bot
+Two Claude Code skills for working with your local WeChat (微信) data on **macOS** and **Windows**:
 
-Export WeChat / Weixin chat history to Markdown (with voice transcription and AI correction), and optionally run an AI auto-reply bot — fully local, no cloud required.
+| Skill | Purpose |
+|---|---|
+| [`wechat-rune-export`](skills/wechat-rune-export/) | Decrypt + export chat history to Markdown, with Whisper voice transcription and AI homophone correction |
+| [`wechat-rune-bot`](skills/wechat-rune-bot/) | Claude-powered auto-reply bot — drafts replies in your voice, sends them through the WeChat UI |
 
-> **macOS and Windows.** Requires WeChat / Weixin desktop client.
+Both skills share one key-extraction pipeline and one decryption core. If you've set up
+the export skill, the bot skill reuses the same `scripts/keys/wechat_keys.json` and jumps
+straight to bot config.
 
----
+## Why "rune"
 
-## Features
+Every WeChat SQLCipher database is sealed behind a 64-character hex key — a string like
+`aa713385968bb2d953fdb6b1f79b83f1e25aac99bd9bb78ea7a31219e274322a`. That's a modern rune:
+a short cryptic symbol carrying the power to unlock everything written behind it. These
+skills find the runes your WeChat process holds in memory and use them to read your own
+data back.
 
-### Chat Export
-- Export any private chat or group chat to clean Markdown
-- **16 message types** supported: text, images, voice, video, stickers, official accounts, mini programs, files, transfers, red packets, pat-pat, quotes (nested), calls, system messages
-- Voice messages automatically transcribed via Whisper (extracted directly from local DB, no network needed)
-- AI homophone correction with invisible HTML annotations
-- Sender names displayed as original WeChat nicknames
-- Deduplication via `server_id` (globally unique)
-
-### AI Bot
-- Monitors specified conversations for trigger words
-- Replies automatically via Claude API
-- Mac: sends via AppleScript — no unofficial protocols
-- Windows: sends via Win32 keyboard simulation
-- Per-conversation memory with configurable history window
-- RAG support with vector search for long-term context
-
----
-
-## How It Works
-
-**Chat Export:**
-```
-Encrypted DB → SQLCipher decrypt → parse messages → Markdown
-Voice (Mac):     media_0.db BLOB → silk-v3-decoder → ffmpeg → Whisper
-Voice (Windows): media_0.db BLOB → pilk → numpy resample → Whisper
-```
-
-**AI Bot:**
-```
-DB change detected → SQLCipher query → trigger match → Claude API → send reply
-```
-
----
-
-## Quick Start
-
-### Prerequisites
-
-**Mac:**
-```bash
-brew install sqlcipher ffmpeg
-pip install -r requirements.txt
-
-# SILK decoder (for voice transcription)
-git clone https://github.com/kn007/silk-v3-decoder.git /tmp/silk-v3-decoder
-cd /tmp/silk-v3-decoder/silk && make
-```
-
-**Windows:**
-```bash
-pip install -r requirements.txt
-# Run subsequent commands as Administrator
-```
-
-### 1. Extract encryption keys
-
-**Mac** (WeChat must be running):
-```bash
-sudo codesign --force --deep --sign - /Applications/WeChat.app
-lldb -p $(pgrep -x WeChat) \
-     -o "script exec(open('scripts/keys/extract_key2.py').read())" \
-     -o "quit"
-```
-
-**Windows** (run as Administrator, Weixin must be running):
-```bash
-python scripts\keys\extract_key_windows.py
-```
-
-### 2. Export chat history
-
-```bash
-python3 scripts/export_chat.py --name "nickname"
-python3 scripts/export_chat.py --name "group name" --group
-```
-
-### 3. Transcribe voice messages (optional)
-
-```bash
-python3 scripts/transcribe_voices.py --name "nickname"
-# Claude corrects homophone errors automatically (no extra command needed)
-python3 scripts/export_chat.py --name "nickname" --voice-json name_voice_map.json
-```
-
-### 4. Run AI bot (optional)
-
-```bash
-echo "wxid_xxx" > .watch
-echo "sk-ant-xxx" > .apikey
-python3 scripts/start.py
-```
-
----
-
-## Supported Message Types
-
-| Type | Output |
-|------|--------|
-| Text | `hi你好。` |
-| Image | `[图片]` |
-| Voice | `[语音 9s] transcribed text` |
-| Video | `[视频 23s]` |
-| Sticker | `[表情包]` |
-| Official Account | `[公众号 \| Name] title` |
-| Mini Program | `[小程序 \| Name] title` |
-| File | `[文件] file.pdf` |
-| Chat Record | `[聊天记录] title` |
-| Transfer | `[转账 ¥0.68]` |
-| Red Packet | `[红包 note]` |
-| Pat-pat | `[互动] I tickled ...` |
-| Call | `[语音通话 120s]` |
-| Quote Reply | text + `> quoted` (nested) |
-| System | *italic* |
-
----
-
-## Project Structure
-
-```
-wechat-export-bot/
-├── scripts/
-│   ├── export_chat.py           # Chat history → Markdown
-│   ├── transcribe_voices.py     # Voice → Whisper transcription (Mac + Windows)
-│   ├── start.py                 # Bot launcher
-│   ├── bot.py                   # Bot main process
-│   ├── config.py                # Configuration — auto-detects platform
-│   ├── dashboard.py             # Web dashboard (localhost:7788)
-│   ├── keys/
-│   │   ├── extract_key2.py      # Mac: LLDB key extraction
-│   │   └── extract_key_windows.py  # Windows: Win32 memory scan
-│   └── core/                    # AI, contacts, RAG, embeddings, sender, etc.
-├── SKILL.md                     # Claude Code skill definition
-├── requirements.txt
-└── .gitignore
-```
-
----
-
-## Platform Comparison
+## Requirements
 
 | | Mac | Windows |
 |---|---|---|
-| Key extraction | LLDB + Mach API | ReadProcessMemory Win32 |
-| SILK decode | silk-v3-decoder (compiled) | pilk (pip) |
-| Audio | ffmpeg → WAV | numpy resample → array |
-| Bot send | AppleScript | Win32 keybd_event |
-| Data path | `~/Library/Containers/.../xwechat_files` | Auto-detected via registry / drive scan |
+| OS | macOS 13+ (Apple Silicon or Intel) | Windows 10+ |
+| Runtime | Python 3.10+, Xcode CLT (for `cc`) | Python 3.10+ |
+| WeChat version | 4.x (Weixin) | 4.x (Weixin) |
+| Extra deps | `brew install sqlcipher ffmpeg`, `silk-v3-decoder` compiled | `pip install -r requirements.txt` (covers everything) |
+| Privileges needed | `sudo` (once for codesign, once per key extraction) | None |
 
-Database schema, message parsing, AI logic, and RAG are identical on both platforms.
+## Install
 
----
+Clone, then symlink the two skills into Claude Code's skill directory:
 
-## Security
+```bash
+git clone https://github.com/xjin6/wechat-rune.git ~/Desktop/wechat-rune
+cd ~/Desktop/wechat-rune
+pip install -r requirements.txt
 
-- `keys/wechat_keys.json` — gitignored, never commit
-- Exported chat files — gitignored
-- API keys — environment variables only
-- Mac: restore WeChat signature after key extraction
+ln -s "$PWD/skills/wechat-rune-export" ~/.claude/skills/wechat-rune-export
+ln -s "$PWD/skills/wechat-rune-bot"    ~/.claude/skills/wechat-rune-bot
+```
 
----
+Relaunch Claude Code. Then:
+- "Export my WeChat chat history" → triggers `wechat-rune-export`
+- "Set up a WeChat auto-reply bot" → triggers `wechat-rune-bot`
 
-## Limitations
+## Repository layout
 
-- WeChat / Weixin desktop client must be running
-- Keys must be re-extracted after major WeChat updates
-- Voice transcription: ~2.8s per message (Whisper `small` model)
-- Bot sending requires WeChat window to be open (Windows)
+```
+wechat-rune/
+├── skills/
+│   ├── wechat-rune-export/
+│   │   ├── SKILL.md          # Claude Code skill manifest
+│   │   └── README.md
+│   └── wechat-rune-bot/
+│       ├── SKILL.md
+│       └── README.md
+├── scripts/                   # shared code used by both skills
+│   ├── keys/
+│   │   ├── extract_key_macos.c     # Mac: compile once, run with sudo
+│   │   └── extract_key_windows.py  # Windows: Python + ctypes
+│   ├── export_chat.py
+│   ├── transcribe_voices.py
+│   ├── start.py                    # bot launcher
+│   ├── bot.py                      # bot main loop
+│   ├── dashboard.py                # live web dashboard
+│   ├── config.py
+│   └── core/                       # RAG, embeddings, sender, decrypt, contacts
+├── requirements.txt
+├── README.md                       # this file
+└── README_CN.md                    # 中文版
+```
+
+## Privacy & legal
+
+- Everything runs locally on your own machine against your own decrypted WeChat data.
+- Nothing is uploaded to third-party servers except Anthropic API calls (only when the
+  bot is running, and only the relevant message window, not your full history).
+- The key extraction mechanism (reading your own process memory) is explicitly allowed
+  by macOS/Windows for processes you own. You are not bypassing any server-side security;
+  you are reading the keys your own WeChat client holds for itself.
+- Don't use the bot to impersonate others in contexts where that's misleading or harmful.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+## Credits
+
+- C key scanner adapted from community reverse-engineering of WeChat 4.x SQLCipher storage
+- SILK audio decoder: [kn007/silk-v3-decoder](https://github.com/kn007/silk-v3-decoder)
+- Whisper: [openai/whisper](https://github.com/openai/whisper)

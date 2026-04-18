@@ -1,5 +1,6 @@
 # Sensitive files
 scripts/keys/wechat_keys.json
+scripts/keys/all_keys.json
 db/
 .env
 .apikey
@@ -21,4 +22,6 @@ __pycache__/
 # Temporary files
 /tmp/
 *.log
-scripts/keys/find_all_keys_macos
+
+# Mac key extractor compiled binary (build locally per machine)
+scripts/keys/extract_key_macos

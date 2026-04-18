@@ -1,21 +1,28 @@
 /*
- * find_all_keys_macos.c - macOS WeChat memory key scanner
+ * extract_key_macos.c - macOS WeChat memory key scanner
  *
  * Scans WeChat process memory for SQLCipher encryption keys in the
- * x'<key_hex><salt_hex>' format used by WeChat 4.x on macOS.
+ * x'<key_hex><salt_hex>' format used by WeChat 3.x and 4.x on macOS.
+ *
+ * Why C + sudo (vs. LLDB): task_for_pid() at root can reach memory regions
+ * that LLDB's process.ReadMemory() cannot, which is where the key pattern
+ * actually lives in WeChat 4.x.
  *
  * Prerequisites:
- *   - WeChat must be ad-hoc signed (or SIP disabled)
- *   - Must run as root (sudo)
+ *   - WeChat must be ad-hoc signed:
+ *       sudo codesign --force --deep --sign - /Applications/WeChat.app
+ *     (WeChat must be fully quit before re-signing, then reopened.)
+ *   - Binary must be run as root (sudo, or osascript admin prompt).
  *
  * Build:
- *   cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
+ *   cc -O2 -o extract_key_macos extract_key_macos.c -framework Foundation
  *
  * Usage:
- *   sudo ./find_all_keys_macos [pid]
- *   If pid is omitted, automatically finds WeChat PID.
+ *   sudo ./extract_key_macos [pid]
+ *   If pid is omitted, auto-discovers WeChat via pgrep.
  *
- * Output: JSON file at ./all_keys.json (compatible with decrypt_db.py)
+ * Output: scripts/keys/wechat_keys.json  (flat { "rel/path.db": "hex_key" })
+ *         Path resolved from the binary's own location, so cwd is irrelevant.
  */
 
 #include <stdio.h>
@@ -28,6 +35,8 @@
 #include <sys/stat.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mach-o/dyld.h>
+#include <libgen.h>
 
 #define MAX_KEYS 256
 #define KEY_SIZE 32
@@ -289,10 +298,18 @@ int main(int argc, char *argv[]) {
     }
     printf("\nMatched %d/%d keys to known DBs\n", matched, key_count);
 
-    /* Save JSON: { "rel/path.db": { "enc_key": "hex" }, ... }
-     * Uses forward slashes (native macOS paths, valid JSON without escaping).
+    /* Write wechat_keys.json alongside this binary (flat format, consumed by
+     * scripts/config.py + scripts/core/decrypt.py). We resolve the path via
+     * _NSGetExecutablePath so the output lands in scripts/keys/ regardless
+     * of the caller's cwd (important when invoked via osascript admin prompt).
      */
-    const char *out_path = "all_keys.json";
+    char exe_path[PATH_MAX];
+    uint32_t exe_path_sz = sizeof(exe_path);
+    char out_path[PATH_MAX] = "wechat_keys.json";
+    if (_NSGetExecutablePath(exe_path, &exe_path_sz) == 0) {
+        char *dir = dirname(exe_path);
+        snprintf(out_path, sizeof(out_path), "%s/wechat_keys.json", dir);
+    }
     FILE *fp = fopen(out_path, "w");
     if (fp) {
         fprintf(fp, "{\n");
@@ -305,14 +322,17 @@ int main(int argc, char *argv[]) {
                     break;
                 }
             }
-            if (!db) continue;
-            fprintf(fp, "%s  \"%s\": {\"enc_key\": \"%s\"}",
+            if (!db) continue;  /* skip stale-shard keys that match no current DB */
+            fprintf(fp, "%s  \"%s\": \"%s\"",
                 first ? "" : ",\n", db, keys[i].key_hex);
             first = 0;
         }
         fprintf(fp, "\n}\n");
         fclose(fp);
         printf("Saved to %s\n", out_path);
+    } else {
+        fprintf(stderr, "Failed to open %s for writing\n", out_path);
+        return 1;
     }
 
     return 0;

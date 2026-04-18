@@ -1,179 +1,91 @@
-[English](README.md) | [中文](README_CN.md)
+# wechat-rune
 
-# wechat-export-bot
+两个 Claude Code skill，用来处理你本地的微信（WeChat）数据，**macOS** 与 **Windows** 共用：
 
-将微信 / Weixin 聊天记录导出为 Markdown（含语音转文字和 AI 纠错），还可以跑一个 AI 自动回复机器人——全部本地完成，不需要云端。
+| Skill | 用途 |
+|---|---|
+| [`wechat-rune-export`](skills/wechat-rune-export/) | 解密导出聊天记录为 Markdown，带 Whisper 语音转写 + AI 同音字纠错 |
+| [`wechat-rune-bot`](skills/wechat-rune-bot/) | 由 Claude 驱动的自动回复机器人——用你的语气起草回复，通过微信 UI 发送 |
 
-> **支持 macOS 和 Windows**，需要微信 / Weixin 桌面客户端。
+两个 skill 共享同一套密钥提取与解密管线。先跑过 `export`，再启动 `bot` 时会自动复用
+已经生成的 `scripts/keys/wechat_keys.json`，直接跳到 bot 配置环节。
 
----
+## 为什么叫 "rune"（符文）
 
-## 功能
+每个微信 SQLCipher 数据库背后都锁着一个 64 位十六进制 key，形如
+`aa713385968bb2d953fdb6b1f79b83f1e25aac99bd9bb78ea7a31219e274322a`——这就是现代意义
+上的符文：一串短小隐晦的符号，却拥有解开背后一切的魔力。这套 skill 的工作，就是从你
+自己的微信进程内存里找到这些符文，然后用它们读回你自己的数据。
 
-### 聊天记录导出
-- 导出任意私聊或群聊为 Markdown
-- 支持 **16 种消息类型**：文字、图片、语音、视频、表情包、公众号、小程序、文件、转账、红包、拍一拍、引用回复（嵌套）、通话、系统消息
-- 语音消息自动转文字（Whisper，直接从本地数据库提取，不需要网络）
-- AI 同音字纠错，HTML 注释标注（渲染不可见）
-- 发送者统一显示微信原始昵称
-- 跨数据库 `server_id` 去重（全局唯一）
+## 环境要求
 
-### AI 机器人
-- 监听指定对话的触发词
-- 通过 Claude API 自动回复
-- Mac：AppleScript 发送，不使用任何非官方协议
-- Windows：Win32 键盘模拟发送
-- 每个对话独立记忆，可配置历史窗口
-- RAG 向量搜索支持长期上下文
+| | Mac | Windows |
+|---|---|---|
+| 操作系统 | macOS 13+（Apple Silicon 或 Intel） | Windows 10+ |
+| 运行时 | Python 3.10+、Xcode 命令行工具（需要 `cc`） | Python 3.10+ |
+| 微信版本 | 4.x（Weixin） | 4.x（Weixin） |
+| 额外依赖 | `brew install sqlcipher ffmpeg`、编译 `silk-v3-decoder` | `pip install -r requirements.txt`（一次搞定） |
+| 所需权限 | `sudo`（重签 1 次 + 每次抓 key 1 次） | 无需 Admin |
 
----
+## 安装
 
-## 原理
+clone，然后 symlink 两个 skill 到 Claude Code 的 skill 目录：
 
-**聊天导出：**
-```
-加密数据库 → SQLCipher 解密 → 解析消息 → Markdown
-语音（Mac）：     media_0.db BLOB → silk-v3-decoder → ffmpeg → Whisper
-语音（Windows）： media_0.db BLOB → pilk → numpy 重采样 → Whisper
-```
-
-**AI 机器人：**
-```
-检测到 DB 变化 → SQLCipher 查询 → 触发词匹配 → Claude API → 发送回复
-```
-
----
-
-## 快速开始
-
-### 前置安装
-
-**Mac：**
 ```bash
-brew install sqlcipher ffmpeg
+git clone https://github.com/xjin6/wechat-rune.git ~/Desktop/wechat-rune
+cd ~/Desktop/wechat-rune
 pip install -r requirements.txt
 
-# SILK 解码器（语音转录用）
-git clone https://github.com/kn007/silk-v3-decoder.git /tmp/silk-v3-decoder
-cd /tmp/silk-v3-decoder/silk && make
+ln -s "$PWD/skills/wechat-rune-export" ~/.claude/skills/wechat-rune-export
+ln -s "$PWD/skills/wechat-rune-bot"    ~/.claude/skills/wechat-rune-bot
 ```
 
-**Windows：**
-```bash
-pip install -r requirements.txt
-# 后续命令以管理员身份运行
-```
-
-### 1. 提取加密密钥
-
-**Mac**（微信必须在运行中）：
-```bash
-sudo codesign --force --deep --sign - /Applications/WeChat.app
-lldb -p $(pgrep -x WeChat) \
-     -o "script exec(open('scripts/keys/extract_key2.py').read())" \
-     -o "quit"
-```
-
-**Windows**（以管理员身份运行，Weixin 必须在运行中）：
-```bash
-python scripts\keys\extract_key_windows.py
-```
-
-### 2. 导出聊天记录
-
-```bash
-python3 scripts/export_chat.py --name "昵称"
-python3 scripts/export_chat.py --name "群名" --group
-```
-
-### 3. 语音转文字（可选）
-
-```bash
-python3 scripts/transcribe_voices.py --name "昵称"
-# Claude 自动纠正同音字错误（无需额外命令）
-python3 scripts/export_chat.py --name "昵称" --voice-json 昵称_voice_map.json
-```
-
-### 4. 启动 AI 机器人（可选）
-
-```bash
-echo "wxid_xxx" > .watch
-echo "sk-ant-xxx" > .apikey
-python3 scripts/start.py
-```
-
----
-
-## 支持的消息类型
-
-| 类型 | 输出示例 |
-|------|---------|
-| 文字 | `hi你好。` |
-| 图片 | `[图片]` |
-| 语音 | `[语音 9s] 转录文字` |
-| 视频 | `[视频 23s]` |
-| 表情包 | `[表情包]` |
-| 公众号 | `[公众号 \| 来源名] 标题` |
-| 小程序 | `[小程序 \| 应用名] 标题` |
-| 文件 | `[文件] 文件名.pdf` |
-| 聊天记录 | `[聊天记录] 标题` |
-| 转账 | `[转账 ¥0.68]` |
-| 红包 | `[红包 备注]` |
-| 拍一拍 | `[互动] I tickled ...` |
-| 通话 | `[语音通话 120s]` |
-| 引用回复 | 正文 + `> 被引内容`（嵌套） |
-| 系统消息 | *斜体* |
-
----
+重启 Claude Code。之后：
+- "帮我导出微信聊天记录" → 触发 `wechat-rune-export`
+- "帮我设置微信 AI 自动回复" → 触发 `wechat-rune-bot`
 
 ## 项目结构
 
 ```
-wechat-export-bot/
-├── scripts/
-│   ├── export_chat.py            # 聊天记录 → Markdown
-│   ├── transcribe_voices.py      # 语音 → Whisper 转录（Mac + Windows）
-│   ├── start.py                  # 机器人启动器
-│   ├── bot.py                    # 机器人主进程
-│   ├── config.py                 # 配置——自动识别平台
-│   ├── dashboard.py              # Web 监控面板（localhost:7788）
+wechat-rune/
+├── skills/
+│   ├── wechat-rune-export/
+│   │   ├── SKILL.md           # Claude Code skill 清单
+│   │   └── README.md
+│   └── wechat-rune-bot/
+│       ├── SKILL.md
+│       └── README.md
+├── scripts/                    # 两个 skill 共享的代码
 │   ├── keys/
-│   │   ├── extract_key2.py       # Mac：LLDB 密钥提取
-│   │   └── extract_key_windows.py   # Windows：Win32 内存扫描
-│   └── core/                     # AI、联系人、RAG、向量存储、发送等
-├── SKILL.md                      # Claude Code skill 定义
+│   │   ├── extract_key_macos.c      # Mac：编译一次，sudo 运行
+│   │   └── extract_key_windows.py   # Windows：Python + ctypes
+│   ├── export_chat.py
+│   ├── transcribe_voices.py
+│   ├── start.py                     # bot 启动器
+│   ├── bot.py                       # bot 主循环
+│   ├── dashboard.py                 # 实时 web 面板
+│   ├── config.py
+│   └── core/                        # RAG、向量检索、发送器、解密、联系人
 ├── requirements.txt
-└── .gitignore
+├── README.md
+└── README_CN.md                     # 本文件
 ```
 
----
+## 隐私与合法性
 
-## 平台对比
+- 一切操作本地进行，对你自己机器上你自己的微信数据进行解密。
+- 除了 bot 运行时调用 Anthropic API（只传最近的消息窗口，不传全部历史），不上传任何
+  第三方服务器。
+- 读取自己进程内存（用来拿 key）是 macOS/Windows 对"你拥有的进程"显式允许的操作。
+  没有绕过任何服务端安全机制——只是读取你自己的微信客户端正在自己使用的那串 key。
+- 不要用 bot 在会误导他人的场景中冒充他人。
 
-| | Mac | Windows |
-|---|---|---|
-| 密钥提取 | LLDB + Mach 内核 API | ReadProcessMemory Win32 |
-| SILK 解码 | silk-v3-decoder（编译） | pilk（pip） |
-| 音频处理 | ffmpeg → WAV | numpy 重采样 → array |
-| 机器人发送 | AppleScript | Win32 keybd_event |
-| 数据路径 | `~/Library/Containers/.../xwechat_files` | 注册表 / 全盘搜索自动检测 |
+## 许可证
 
-数据库结构、消息解析、AI 逻辑、RAG 两端完全相同。
+MIT，详见 [LICENSE](LICENSE)。
 
----
+## 致谢
 
-## 安全
-
-- `keys/wechat_keys.json` — 已 gitignore，绝不提交
-- 导出的聊天文件 — 已 gitignore
-- API 密钥 — 仅通过环境变量读取
-- Mac：密钥提取完成后恢复微信原始签名
-
----
-
-## 限制
-
-- 微信 / Weixin 桌面客户端必须在运行
-- 大版本更新后需重新提取密钥
-- 语音转录约 2.8 秒/条（Whisper `small` 模型）
-- Windows 机器人发送需要微信窗口保持打开
+- C 版 key scanner 改编自社区对 WeChat 4.x SQLCipher 存储的逆向分析
+- SILK 音频解码：[kn007/silk-v3-decoder](https://github.com/kn007/silk-v3-decoder)
+- Whisper：[openai/whisper](https://github.com/openai/whisper)

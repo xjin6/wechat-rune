@@ -1,26 +1,32 @@
 ---
-name: wechat-export-bot
+name: wechat-rune-export
 description: >
-  Step-by-step guide to sync, decrypt, and export WeChat (微信/Weixin) chat history on
-  macOS or Windows, including voice message transcription (语音转文字) via Whisper and
-  AI homophone correction, then optionally set up an AI auto-reply bot powered by Claude.
-  Trigger this skill whenever the user wants to: export WeChat chat records to markdown,
-  decrypt the WeChat database, extract WeChat encryption keys, transcribe WeChat voice
-  messages, correct voice transcriptions, set up a WeChat AI bot, or asks anything about
-  accessing local WeChat data on Mac or Windows.
+  Export WeChat (微信/Weixin) chat history to Markdown on macOS or Windows,
+  including voice message transcription (语音转文字) via Whisper and AI
+  homophone correction. Walks the user through syncing from phone,
+  extracting SQLCipher encryption keys from process memory, decrypting
+  the databases, and producing a clean per-conversation Markdown file.
+  Trigger this skill whenever the user wants to: export WeChat chat
+  records, decrypt the WeChat database, back up their WeChat history,
+  extract WeChat encryption keys, transcribe WeChat voice messages,
+  correct voice transcriptions, or asks anything about reading local
+  WeChat data on Mac or Windows.
 ---
 
-# WeChat Chat History Export & AI Bot Setup Guide
+# WeChat Chat History Export
 
-Works on **macOS** and **Windows** from the same codebase. Four steps.
+Works on **macOS** and **Windows** from the same codebase. Three steps.
 **Detect platform automatically. Guide interactively — wait for user confirmation at each step.**
+
+> **Workspace convention.** All file paths and shell commands below are relative to the
+> repo root (default `~/Desktop/vibe-coding/wechat-rune`). Before running any command,
+> `cd` there first.
 
 | Step | Description |
 |------|-------------|
 | 1 | Sync phone chat history to computer |
 | 2 | Extract database encryption keys |
 | 3 | Export chat + voice transcription + AI correction |
-| 4 | (Optional) AI auto-reply bot |
 
 ---
 
@@ -45,6 +51,22 @@ Ask the user: "Have you already synced messages from your phone, or do you need 
 WeChat databases are encrypted with SQLCipher. Keys live in process memory only briefly
 after Weixin opens its databases. **Extract immediately after launch.**
 
+**First: check whether the key file already exists and is still valid.**
+
+```bash
+python -c "
+import json, os
+p = 'scripts/keys/wechat_keys.json'
+if not os.path.exists(p):
+    print('MISSING'); exit()
+d = json.load(open(p))
+print(f'EXISTS: {len(d)} keys')
+"
+```
+
+If it prints `EXISTS: N keys` (N > 0) and the user hasn't just done a phone sync, skip the
+rest of Step 2 and jump to Step 3. Otherwise, run the platform-specific extraction below.
+
 ### Windows
 
 Run directly — no Administrator required:
@@ -58,11 +80,6 @@ python scripts/keys/extract_key_windows.py
 2. Reopen Weixin and wait for it to fully load (log in if needed)
 3. Run the script again within ~30 seconds of Weixin starting
 
-```bash
-# Verify
-python -c "import json; print(len(json.load(open('scripts/keys/wechat_keys.json'))), 'keys')"
-```
-
 > Expected: 15–20 keys. If you recently synced from phone and a new `message_N.db`
 > was created, that database's key will only be captured on the next Weixin restart.
 
@@ -75,18 +92,31 @@ pip install -r requirements.txt
 git clone https://github.com/kn007/silk-v3-decoder.git /tmp/silk-v3-decoder
 cd /tmp/silk-v3-decoder/silk && make
 
-# Re-sign WeChat to allow debugger
+# Re-sign WeChat (one-time; must be fully quit first, then reopened after).
+# Hardened runtime on the Tencent-signed binary blocks task_for_pid until
+# this is done.
 sudo codesign --force --deep --sign - /Applications/WeChat.app
 
-# Extract (WeChat must be running)
-lldb -p $(pgrep -x WeChat) \
-     -o "script exec(open('scripts/keys/extract_key2.py').read())" \
-     -o "quit"
+# Build the key extractor (one-time)
+cc -O2 -o scripts/keys/extract_key_macos \
+    scripts/keys/extract_key_macos.c -framework Foundation
+
+# Extract (WeChat must be running, with at least one chat opened so its
+# DBs are loaded). Root is required because task_for_pid at root reaches
+# the SQLCipher heap regions that hold the x'KEY+SALT' pattern; an
+# ordinary-user LLDB attach cannot see those regions on WeChat 4.x.
+sudo ./scripts/keys/extract_key_macos
 ```
 
-**Mac permission issues:**
-- macOS 13+: System Settings → Privacy & Security → Developer Tools → enable Terminal
-- Still fails: Recovery Mode → `csrutil disable` → re-enable when done
+> Expected: ~18 keys (one per active DB shard). The output file
+> `scripts/keys/wechat_keys.json` is written alongside the binary in flat
+> format, identical to what the Windows extractor produces — so every
+> downstream script is cross-platform from here on.
+
+> **Don't wrap in `osascript ... with administrator privileges`.** macOS
+> sandboxes processes launched via `AuthorizationExecuteWithPrivileges`,
+> and `task_for_pid` is blocked in that context. A direct terminal `sudo`
+> is the only invocation that works.
 
 ---
 
@@ -99,7 +129,7 @@ This step is interactive. Follow this flow:
 Ask: "Whose chat history would you like to export? (nickname, remark name, or group name)"
 
 ```bash
-python scripts/export_chat.py --name "nickname"              # private chat
+python scripts/export_chat.py --name "nickname"             # private chat
 python scripts/export_chat.py --name "group name" --group   # group chat
 ```
 
@@ -108,7 +138,7 @@ This gives them immediate confirmation that it's working before the longer voice
 
 ### 3b. Voice transcription (ask user)
 
-After the basic export, ask: "There are N voice messages. Want to transcribe them? 
+After the basic export, ask: "There are N voice messages. Want to transcribe them?
 It takes ~3–4 seconds per message (Whisper `small` model), so roughly X minutes total.
 Use `--model medium` for higher accuracy but ~2× slower."
 
@@ -163,44 +193,17 @@ python scripts/export_chat.py --name "nickname" --voice-json nickname_voice_map.
 
 ---
 
-## Step 4 (Optional): AI Auto-Reply Bot
-
-### Windows Setup
-WeChat window must remain open; bot uses keyboard simulation to send replies.
-
-### Mac Setup
-Enable accessibility: System Settings → Privacy & Security → Accessibility → enable Terminal
-
-### Configuration
-
-1. **Conversations**: Ask who to monitor, look up wxid, write to `.watch`
-2. **API Key**: Ask for Anthropic API Key (`sk-ant-...`), write to `.apikey`
-3. **Trigger words**: Customize via `.env` (defaults in `config.py`)
-
-### Launch
-
-```bash
-python scripts/start.py
-# or specify directly:
-python scripts/start.py "group name" "contact name"
-```
-
-Optional dashboard: `python scripts/dashboard.py` → http://localhost:7788 | Stop: `Ctrl+C`
-
----
-
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | "No keys found" on Windows | Close Weixin fully → reopen → run script within 30s |
 | "No keys found" after phone sync | New database created — must restart Weixin to capture new key |
+| `task_for_pid failed` (Mac) | WeChat not ad-hoc signed — rerun `sudo codesign --force --deep --sign - /Applications/WeChat.app` with WeChat **fully quit** first |
+| `extract_key_macos` returns 0 keys (Mac) | Forgot `sudo`, or WeChat hasn't opened a chat yet — click a conversation, then rerun |
 | Empty export | Re-extract keys; check wxid spelling |
-| LLDB attach fails (Mac) | Developer Tools permission, or disable SIP |
 | `sqlcipher3` errors | `pip install sqlcipher3` |
-| AppleScript can't send (Mac) | Accessibility permission for Terminal |
-| Bot can't send (Windows) | WeChat window must be open and focused |
-| Voice in Traditional Chinese | Change `initial_prompt` in `transcribe_voices.py` |
+| Voice in Traditional Chinese | Change `initial_prompt` in `scripts/transcribe_voices.py` |
 | No key for `media_0.db` | Re-extract immediately after Weixin restarts |
 
 ---
@@ -234,9 +237,7 @@ is roughly 30–60 seconds after Weixin starts. After phone sync, new database s
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/keys/extract_key_windows.py` | Windows: extract keys (run after Weixin restart) |
-| `scripts/keys/extract_key2.py` | Mac: extract keys via LLDB |
+| `scripts/keys/extract_key_windows.py` | Windows: extract keys |
+| `scripts/keys/extract_key_macos.c` | Mac: extract keys (compile once, run with sudo) |
 | `scripts/export_chat.py` | Export chat to Markdown |
 | `scripts/transcribe_voices.py` | Batch voice transcription |
-| `scripts/start.py` | Launch AI bot |
-| `scripts/dashboard.py` | Web dashboard — localhost:7788 |
