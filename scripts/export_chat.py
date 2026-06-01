@@ -258,7 +258,11 @@ def _format_refermsg(refermsg, prefix=">", nick_map=None) -> str:
     return result
 
 
-def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = None, nick_map: dict = None):
+_IMG_MD5_RE = re.compile(r'\bmd5="([a-f0-9]{32})"')
+_IMG_ORIGSRC_RE = re.compile(r'\boriginsourcemd5="([a-f0-9]*)"')
+
+def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = None,
+               nick_map: dict = None, image_map: dict = None):
     text = _decode_raw(hex_str)
     is_system = False
 
@@ -267,6 +271,24 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
             return None, False
         return text, False
     elif local_type == 3:
+        if image_map:
+            m = _IMG_MD5_RE.search(text or "")
+            if m:
+                entry = image_map.get("by_orig_md5", {}).get(m.group(1))
+                if entry:
+                    thumb = entry.get("thumb")
+                    # 区分:
+                    #   originsourcemd5 非空 = 用户上传的内容（照片/截图）→ [图片]
+                    #   originsourcemd5 为空 = 微信自带/表情/动图 → [动图]
+                    osrc = _IMG_ORIGSRC_RE.search(text or "")
+                    is_animated = bool(osrc and not osrc.group(1))
+                    tag = "[动图]" if is_animated else "[图片]"
+                    desc = (image_map.get("descriptions") or {}).get(m.group(1), "")
+                    if thumb:
+                        rel = f"images/{thumb}"
+                        if desc:
+                            return f"{tag} ![]({rel})\n> 描述: {desc}", False
+                        return f"{tag} ![]({rel})", False
         return "[图片]", False
     elif local_type == 34:
         root = _parse_xml(text)
@@ -398,7 +420,7 @@ def _build_nick_map(keys_file: str, db_dir: str, my_wxid: str) -> dict:
 # ── Core export ───────────────────────────────────────────────────
 
 def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
-                out_path: str, voice_map: dict = None):
+                out_path: str, voice_map: dict = None, image_map: dict = None):
     keys  = json.load(open(keys_file))
     table = "Msg_" + hashlib.md5(wxid.encode()).hexdigest()
 
@@ -453,7 +475,7 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
                 sender_id = int(row[1])
                 local_type = int(row[3])
                 svr_id    = int(row[4]) if row[4] else 0
-                text, is_system = format_msg(row[2], local_type, voice_map=voice_map, ts=ts, nick_map=nick_map)
+                text, is_system = format_msg(row[2], local_type, voice_map=voice_map, ts=ts, nick_map=nick_map, image_map=image_map)
                 if text is None:
                     continue
                 # Suppress WeChat's "update app" placeholder for unsupported message types
@@ -504,6 +526,8 @@ def main():
     parser.add_argument("--group",      action="store_true", help="Search group chats")
     parser.add_argument("--out",        help="Output Markdown path")
     parser.add_argument("--voice-json", help="Voice transcription JSON")
+    parser.add_argument("--image-index", help="image_index.json built by build_image_index.py")
+    parser.add_argument("--image-descriptions", help="image_descriptions.json (md5 -> Chinese description)")
     args = parser.parse_args()
 
     if not args.name and not args.wxid:
@@ -547,7 +571,20 @@ def main():
             voice_map = json.load(open(vj, encoding="utf-8"))
             print(f"Loaded voice transcriptions: {len(voice_map)} entries")
 
-    export_chat(target_wxid, display_name, keys_file, db_dir, out_path, voice_map=voice_map)
+    image_map = None
+    if args.image_index:
+        ij = os.path.expanduser(args.image_index)
+        if os.path.exists(ij):
+            image_map = json.load(open(ij, encoding="utf-8"))
+            print(f"Loaded image index: {len(image_map.get('by_orig_md5', {}))} entries")
+    if args.image_descriptions and image_map is not None:
+        idsc = os.path.expanduser(args.image_descriptions)
+        if os.path.exists(idsc):
+            image_map["descriptions"] = json.load(open(idsc, encoding="utf-8"))
+            print(f"Loaded image descriptions: {len(image_map['descriptions'])} entries")
+
+    export_chat(target_wxid, display_name, keys_file, db_dir, out_path,
+                voice_map=voice_map, image_map=image_map)
 
 
 if __name__ == "__main__":

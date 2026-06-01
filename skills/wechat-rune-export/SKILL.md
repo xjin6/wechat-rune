@@ -2,20 +2,25 @@
 name: wechat-rune-export
 description: >
   Export WeChat (微信/Weixin) chat history to Markdown on macOS or Windows,
-  including voice message transcription (语音转文字) via Whisper and AI
-  homophone correction. Walks the user through syncing from phone,
-  extracting SQLCipher encryption keys from process memory, decrypting
-  the databases, and producing a clean per-conversation Markdown file.
-  Trigger this skill whenever the user wants to: export WeChat chat
-  records, decrypt the WeChat database, back up their WeChat history,
-  extract WeChat encryption keys, transcribe WeChat voice messages,
-  correct voice transcriptions, or asks anything about reading local
-  WeChat data on Mac or Windows.
+  including voice message transcription (语音转文字) via Whisper, AI
+  homophone correction, image decryption (Weixin 4.x V2 .dat),
+  inline-thumbnail embedding, and per-image AI Chinese descriptions.
+  Walks the user through syncing from phone, extracting SQLCipher
+  encryption keys from process memory, decrypting databases AND attached
+  images, and producing a self-contained per-conversation Markdown file
+  where text + voice transcripts + image thumbnails + image descriptions
+  all live inline. Trigger this skill whenever the user wants to: export
+  WeChat chat records, decrypt the WeChat database, back up their WeChat
+  history, extract WeChat encryption keys, transcribe WeChat voice
+  messages, correct voice transcriptions, decrypt WeChat .dat image
+  files, embed WeChat images in markdown, generate AI descriptions for
+  chat images, or asks anything about reading local WeChat data on Mac
+  or Windows.
 ---
 
 # WeChat Chat History Export
 
-Works on **macOS** and **Windows** from the same codebase. Three steps.
+Works on **macOS** and **Windows** from the same codebase. Four steps.
 **Detect platform automatically. Guide interactively — wait for user confirmation at each step.**
 
 > **Workspace convention.** All file paths and shell commands below are relative to the
@@ -27,6 +32,7 @@ Works on **macOS** and **Windows** from the same codebase. Three steps.
 | 1 | Sync phone chat history to computer |
 | 2 | Extract database encryption keys |
 | 3 | Export chat + voice transcription + AI correction |
+| 4 | (Optional) Decrypt images + AI describe + re-export with thumbnails inline |
 
 ---
 
@@ -69,16 +75,22 @@ rest of Step 2 and jump to Step 3. Otherwise, run the platform-specific extracti
 
 ### Windows
 
-Run directly — no Administrator required:
+Run directly — Administrator may be needed for some memory regions:
 
 ```bash
 python scripts/keys/extract_key_windows.py
 ```
 
+The script auto-targets the **main** `Weixin.exe` process (no `--type=` cmdline flag).
+Newer Weixin (4.x) is multi-process (Chromium-style); only the parent holds the SQLCipher
+heap. Subprocesses (wxocr, wxplayer, wxpublic, wxutility) won't yield keys.
+
 **If it returns "No keys found":**
-1. Completely close Weixin
-2. Reopen Weixin and wait for it to fully load (log in if needed)
-3. Run the script again within ~30 seconds of Weixin starting
+1. Completely close Weixin (check tray icon + Task Manager for any `Weixin.exe`)
+2. Reopen Weixin and **click into a chat + Contacts tab** so the DBs actually get opened
+3. Run the script again within ~30 seconds
+4. If still empty, re-run as **Administrator** (right-click → Run as Admin); on some
+   builds, kernel-protected memory regions are only readable with elevation.
 
 > Expected: 15–20 keys. If you recently synced from phone and a new `message_N.db`
 > was created, that database's key will only be captured on the next Weixin restart.
@@ -172,12 +184,155 @@ Write corrections back with `"corrections": ["wrong→right"]` field. Then re-ex
 python scripts/export_chat.py --name "nickname" --voice-json nickname_voice_map.json
 ```
 
+---
+
+## Step 4: (Optional) Decrypt + Embed Images
+
+Ask: "Want to also decrypt the image attachments and embed thumbnails (with AI Chinese
+descriptions) inline in the markdown? It takes ~30 min for ~400 unique images."
+
+If yes, run the full image pipeline below. Each sub-step has a quick smoke test before
+the heavy work, so failures are caught early.
+
+### 4a. Locate the contact's image folder
+
+Each conversation's images live under
+`<xwechat_files>/<account>/msg/attach/<MD5(contact_wxid)>/<YYYY-MM>/Img/*.dat`.
+Compute the MD5 of the contact's wxid (the **real** wxid, e.g. `wxid_clslfiswnis422`,
+not the user-set 微信号), then point the next scripts at that folder.
+
+```bash
+python -c "
+import hashlib
+print(hashlib.md5(b'wxid_clslfiswnis422').hexdigest())
+"
+```
+
+### 4b. Derive the image AES key
+
+WeChat 4.x wraps images in a V2 container (`07 08 V2 08 07` magic) holding an
+AES-128-ECB ciphertext + raw bytes + 1-byte XOR. The AES key is **per-account, not
+per-file**, and is `md5(str(uin) + wxid)[:16]` (ASCII).
+
+`find_image_key.py` derives `uin` by brute force using two constraints we can compute
+from disk:
+- `xor_key = uin & 0xFF` — voted from a few V2 .dat files (their last byte XOR 0xD9
+  always equals the xor_key because every JPEG ends with `FF D9`)
+- `md5(str(uin)).hexdigest()[:4]` equals the 4-hex suffix on the account folder
+  (e.g. `magicxinjx_c092` → suffix `c092`)
+
+```bash
+python scripts/find_image_key.py \
+  --attach-dir "<full path to MD5 folder>" \
+  --account-folder "magicxinjx_c092"
+```
+
+Expected output: `FOUND: uin=… aes_key=… xor_key=…` in <10 seconds. Save the
+hex-string `aes_key` for the next step.
+
+> If brute force fails: confirm the account folder name actually ends in 4 hex chars
+> (e.g. `_c092`). If the folder name is something else (long auto-wxid like
+> `wxid_iv139ys0vn3412_4ae6`), the suffix `4ae6` is still 4 hex chars — use that.
+
+### 4c. Bulk-decrypt all .dat files
+
+```bash
+python scripts/decrypt_images.py \
+  --attach-dir "<full path to MD5 folder>" \
+  --out-dir "<output>/images" \
+  --aes-key "<aes_key from 4b>"
+```
+
+This runs locally in 1–2 min for ~1500 files. Produces JPG/PNG/HEVC files preserving
+the `YYYY-MM/Img/` folder layout. Three filename suffixes appear:
+- `<id>_t.<ext>` — thumbnail (small JPEG preview, always present)
+- `<id>_h.<ext>` — HD original (sometimes)
+- `<id>.<ext>` — original (sometimes)
+
+> The `--probe` flag decrypts only one file as a smoke test — use this first to verify
+> the key before committing to bulk decryption.
+
+### 4d. Build the file index
+
+This maps `md5(decrypted-content)` → `{thumb, hd, orig, animated}` so the export
+script can look up files by the md5 attribute in each message's XML.
+
+```bash
+python scripts/build_image_index.py "<output>/images" "<output>/image_index.json"
+```
+
+Expected: ~600 entries for a typical relationship. Watch coverage when you re-export
+— typically ~70% of `[图片]` messages will map to a file (older messages get auto-cleaned
+by Weixin and have no local copy).
+
+### 4e. Generate AI descriptions
+
+First, generate the to-describe list — this is filtered to **non-animated** images only
+(real photos/screenshots; animated wxgf stickers get just a thumbnail, no description,
+since the thumb conveys the joke):
+
+```bash
+python scripts/build_describe_list.py "<contact_wxid>" \
+  "<output>/image_index.json" "<output>/describe_list.json"
+```
+
+Then split into 8 batches and **delegate to 8 parallel `general-purpose` agents**.
+This is dramatically faster + cheaper than describing 400 images sequentially in the
+main context.
+
+Each agent gets:
+- Input: a per-batch JSON of `[{md5, path}, ...]`
+- Task: Read each thumbnail, write a 20–50-char Chinese description focused on
+  content type + key visible elements + readable text snippets
+- Output: write a JSON `{md5: description, ...}` to a known per-batch path
+
+> **Heads-up: agents sometimes emit invalid JSON** when descriptions contain unescaped
+> ASCII double quotes (Chinese text often references English words/labels with `"..."`).
+> After agents finish, verify each batch JSON parses; if any fail, recover by reading
+> the file as text and re-parsing line-by-line with a tolerant regex
+> `r'"([a-f0-9]{32})":\s*"(.+)'` (strip trailing `"` and `,`).
+
+Merge the 8 batch outputs into one `image_descriptions.json` keyed by content md5.
+
+### 4f. Re-export with images and descriptions
+
+```bash
+python scripts/export_chat.py --name "nickname" \
+  --voice-json "nickname_voice_map.json" \
+  --image-index "<output>/image_index.json" \
+  --image-descriptions "<output>/image_descriptions.json"
+```
+
+`[图片]` messages now render as:
+
+```
+[图片] ![](images/2026-03/Img/<id>_t.jpg)
+> 描述: <AI Chinese description>
+```
+
+Animated stickers render the same way but tagged `[动图]` (no description). If the
+recipient of the .md doesn't have the `images/` folder, the thumbnails fail to load
+silently but the `> 描述:` line still conveys the content.
+
+### 图片 vs 动图 classification
+
+We don't decode the wxgf container to count frames. Instead we use the message XML's
+`originsourcemd5` attribute:
+- **non-empty** → user-uploaded content (photo / screenshot, even if encoded as wxgf
+  HEVC) → `[图片]`
+- **empty** → forwarded sticker / animation that lost its source provenance → `[动图]`
+
+This is **not 100% accurate** — a few static images forwarded multiple times will get
+tagged `[动图]`. But it's correct ~95% of the time and trivially fast.
+
 ### Supported Message Types
 
 | Type | Output |
 |------|--------|
 | Text | plain text |
-| Image | `[图片]` |
+| Image (with index + description) | `[图片] ![](images/.../id_t.jpg)\n> 描述: …` |
+| Image (fallback, no index) | `[图片]` |
+| Animated sticker | `[动图] ![](images/.../id_t.jpg)` (no description) |
 | Voice | `[语音 9s] transcribed text <!-- correction: X→Y -->` |
 | Video | `[视频 23s]` |
 | Sticker | `[表情包]` |
@@ -197,7 +352,8 @@ python scripts/export_chat.py --name "nickname" --voice-json nickname_voice_map.
 
 | Problem | Solution |
 |---------|----------|
-| "No keys found" on Windows | Close Weixin fully → reopen → run script within 30s |
+| "No keys found" on Windows | Close Weixin fully → reopen → click into a chat + Contacts tab → run script within 30s |
+| Key extractor finds 0 keys but Weixin is running | Likely targeting a subprocess. Verify the script picks the **main** PID (no `--type=` cmdline). On newer Weixin 4.x the auto-detect handles this; if still failing, run as Administrator. |
 | "No keys found" after phone sync | New database created — must restart Weixin to capture new key |
 | `task_for_pid failed` (Mac) | WeChat not ad-hoc signed — rerun `sudo codesign --force --deep --sign - /Applications/WeChat.app` with WeChat **fully quit** first |
 | `extract_key_macos` returns 0 keys (Mac) | Forgot `sudo`, or WeChat hasn't opened a chat yet — click a conversation, then rerun |
@@ -205,6 +361,11 @@ python scripts/export_chat.py --name "nickname" --voice-json nickname_voice_map.
 | `sqlcipher3` errors | `pip install sqlcipher3` |
 | Voice in Traditional Chinese | Change `initial_prompt` in `scripts/transcribe_voices.py` |
 | No key for `media_0.db` | Re-extract immediately after Weixin restarts |
+| `find_image_key.py` brute force fails | Confirm `--account-folder` value ends in 4 hex chars; that suffix is the search constraint |
+| Decrypt probe "no recognized format magic" | Wrong AES key OR wrong attach folder. Recheck the MD5 of the contact's wxid and the brute-force output. |
+| Image descriptions JSON won't parse | An agent emitted unescaped quotes — recover with line-by-line regex parsing (see Step 4e) |
+| `[图片]` not embedding despite description being present | Description JSON must be keyed by md5(decrypted-content), **not** by the filename basename. Filenames use a different hash. |
+| Many `[图片]` messages with no embed | Coverage is naturally ~70% — Weixin auto-cleans old image files on disk. Nothing to do; the messages remain as bare `[图片]`. |
 
 ---
 
@@ -224,6 +385,7 @@ is roughly 30–60 seconds after Weixin starts. After phone sync, new database s
 | `message_N.db` | Chat messages — table `Msg_` + MD5(wxid). New shards created when current hits ~30MB |
 | `contact.db` | Contacts (nick_name, remark, wxid) |
 | `media_0.db` | Voice data — `VoiceInfo` table, SILK BLOBs |
+| `hardlink.db` | `image_hardlink_info_v4` — content-md5 → on-disk filename mapping (not actually used by the pipeline; we md5 decrypted files directly) |
 
 ### Voice Pipeline
 
@@ -233,11 +395,42 @@ is roughly 30–60 seconds after Weixin starts. After phone sync, new database s
 | Audio conversion | ffmpeg → WAV file | numpy resample → float32 array (no ffmpeg needed) |
 | Whisper input | file path | numpy array |
 
+### Image V2 Container Format
+
+```
+[6B magic "07 08 V2 08 07"]
+[4B aes_size LE]
+[4B xor_size LE]
+[1B padding]                           = 15-byte header total
+[aligned_aes_size bytes AES-128-ECB]   (PKCS7-padded to 16B blocks)
+[raw bytes (plaintext)]                (variable length)
+[xor_size bytes (single-byte XOR)]
+```
+
+`aligned_aes_size = aes_size + (16 - aes_size % 16)` — always at least one extra block.
+Concatenating the three decrypted segments gives back the original JPEG/PNG/wxgf bytes.
+
+### AES Image-Key Derivation (cross-platform)
+
+```
+xor_key = uin & 0xFF
+aes_key = md5(str(uin) + wxid).hexdigest()[:16].encode("ascii")
+```
+
+Where `uin` is the account UIN (large integer) and `wxid` is the user's wxid in its
+normalized form. We never read process memory for the image key — it's recoverable
+entirely from disk via brute force, since the search space (2²⁴ candidates filtered
+by an md5 prefix) is small. See `scripts/find_image_key.py`.
+
 ### Script Index
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/keys/extract_key_windows.py` | Windows: extract keys |
-| `scripts/keys/extract_key_macos.c` | Mac: extract keys (compile once, run with sudo) |
-| `scripts/export_chat.py` | Export chat to Markdown |
+| `scripts/keys/extract_key_windows.py` | Windows: extract SQLCipher DB keys (auto-targets main Weixin.exe) |
+| `scripts/keys/extract_key_macos.c` | Mac: extract DB keys (compile once, run with sudo) |
+| `scripts/export_chat.py` | Export chat to Markdown (with optional `--voice-json`, `--image-index`, `--image-descriptions`) |
 | `scripts/transcribe_voices.py` | Batch voice transcription |
+| `scripts/find_image_key.py` | Brute-force the V2 image AES key from disk |
+| `scripts/decrypt_images.py` | Bulk decrypt V2 `.dat` images to JPG/PNG/HEVC |
+| `scripts/build_image_index.py` | Build content-md5 → file-path index after bulk decrypt |
+| `scripts/build_describe_list.py` | Filter `[图片]` (non-animated) image messages into a flat list for AI description |

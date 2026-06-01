@@ -224,12 +224,31 @@ def verify_key_open(key_hex: str, db_path: str) -> bool:
 # ── Process memory scan ───────────────────────────────────────────
 
 def find_wechat_pid() -> int:
-    """Return the PID of WeChat.exe (or 0 if not running)."""
+    """Return the PID of the MAIN WeChat.exe / Weixin.exe process.
+
+    Newer Weixin (4.x) is multi-process (Chromium-style). Only the parent has the
+    SQLCipher heap with PRAGMA-key strings; the renderer/utility/wxocr children
+    don't. They're distinguishable by having `--type=...` in their cmdline.
+    Of multiple main candidates, prefer the earliest-started one (which is the
+    actual parent — children inherit but the parent always starts first).
+    """
     try:
         import psutil
-        for proc in psutil.process_iter(['pid', 'name']):
-            if proc.info['name'].lower() in ('wechat.exe', 'weixin.exe'):
-                return proc.info['pid']
+        candidates = []
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
+            try:
+                if proc.info['name'].lower() not in ('wechat.exe', 'weixin.exe'):
+                    continue
+                cmd = proc.info.get('cmdline') or []
+                if any('--type=' in arg for arg in cmd):
+                    continue   # subprocess
+                candidates.append((proc.info['create_time'], proc.info['pid']))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if candidates:
+            candidates.sort()
+            return candidates[0][1]
+        return 0
     except ImportError:
         # psutil not installed — fall back to Windows PSAPI
         MAX_PIDS = 1024
