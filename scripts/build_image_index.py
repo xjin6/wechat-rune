@@ -46,30 +46,39 @@ for path in dec_dir.rglob("*"):
     folder = str(path.parent.relative_to(dec_dir).as_posix())
     groups[(folder, base_id)][kind] = rel
 
-# For each group, md5 each file → build index keyed by md5
-# Index value: dict with 'thumb', 'hd', 'orig' rel paths + the md5 itself
+# For each group, md5 each variant present and key the SAME entry under all of
+# them. The WeChat message XML's md5 attribute is md5 of the user's ORIGINAL
+# uploaded bytes — usually equal to md5(decrypted no-suffix file). But on disk
+# the original is often absent (only _h HD and _t thumb survive); HD is a
+# server-side re-encode with different bytes. Indexing under every variant's
+# md5 makes the lookup tolerant regardless of which file the index sees.
 index = {}
 md5_collision = 0
 ok = 0
 for (folder, base_id), members in groups.items():
     entry = {"thumb": members.get("t"), "hd": members.get("h"), "orig": members.get("o")}
-    # The MD5 of decrypted bytes — message XML uses MD5 of the ORIGINAL image
-    # (full / HD / no-suffix). Compute md5 of HD if present, else orig, else thumb.
-    primary = members.get("h") or members.get("o") or members.get("t")
+    # Pick a "primary" only for animated-detection (doesn't affect indexing).
+    primary = members.get("o") or members.get("h") or members.get("t")
     if not primary:
         continue
-    full_path = dec_dir / primary
-    try:
-        data = full_path.read_bytes()
+    primary_path = dec_dir / primary
+    entry["animated"] = is_animated_file(primary_path) if primary.endswith(".hevc") else False
+    indexed_any = False
+    for kind in ("o", "h", "t"):
+        rel = members.get(kind)
+        if not rel:
+            continue
+        try:
+            data = (dec_dir / rel).read_bytes()
+        except Exception:
+            continue
         md5 = hashlib.md5(data).hexdigest()
-    except Exception as e:
-        continue
-    if md5 in index:
-        md5_collision += 1
-    # Animated only if the primary is wxgf-magic HEVC (real WeChat sticker)
-    entry["animated"] = is_animated_file(full_path) if primary.endswith(".hevc") else False
-    index[md5] = entry
-    ok += 1
+        if md5 in index and index[md5] is not entry:
+            md5_collision += 1
+        index[md5] = entry
+        indexed_any = True
+    if indexed_any:
+        ok += 1
 
 # Also index thumbnails separately so we can find by either md5
 thumb_index = {}

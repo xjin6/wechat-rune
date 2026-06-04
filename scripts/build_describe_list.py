@@ -43,10 +43,15 @@ for shard in ["message_0.db", "message_1.db"]:
     c = _sc.connect(db)
     c.execute(f'PRAGMA key = "x\'{key}\'"')
     c.execute("PRAGMA cipher_page_size = 4096")
-    rows = c.execute(
-        f"SELECT create_time, real_sender_id, message_content "
-        f"FROM {tbl} WHERE local_type=3 ORDER BY create_time ASC"
-    ).fetchall()
+    try:
+        rows = c.execute(
+            f"SELECT create_time, real_sender_id, message_content "
+            f"FROM {tbl} WHERE local_type=3 ORDER BY create_time ASC"
+        ).fetchall()
+    except _sc.dbapi2.OperationalError:
+        # Table doesn't exist in this shard — contact has no messages here
+        c.close()
+        continue
     for ts, sender_id, content in rows:
         if not content:
             continue

@@ -303,16 +303,25 @@ python scripts/export_chat.py --name "nickname" \
   --image-descriptions "<output>/image_descriptions.json"
 ```
 
-`[图片]` messages now render as:
+`[图片]` messages now render inline as:
 
 ```
-[图片] ![](images/2026-03/Img/<id>_t.jpg)
-> 描述: <AI Chinese description>
+[图片: <AI Chinese description>] ![](images/2026-03/Img/<id>_t.jpg)
 ```
 
-Animated stickers render the same way but tagged `[动图]` (no description). If the
-recipient of the .md doesn't have the `images/` folder, the thumbnails fail to load
-silently but the `> 描述:` line still conveys the content.
+The description is inside the same bracket as the type tag so it does NOT collide
+with markdown's `>` blockquote (which is also used by quote-reply rendering).
+Animated stickers render as `[动图] ![](images/...)` (no description — the thumb
+conveys the joke). If the recipient of the .md doesn't have the `images/` folder,
+the inline thumbnails fail to load silently but the description still conveys the
+content.
+
+> **Image-description prompt — write transcription-first.** When generating
+> descriptions, agents must prefer FAITHFUL TEXT TRANSCRIPTION over generic visual
+> summary. For chat screenshots / documents / social posts, quote the visible
+> Chinese text VERBATIM using Chinese 「」 / 『』 quotes (never ASCII `"` — it
+> breaks the JSON file). For photos, 30–80 chars on subject + setting. Never
+> emit `无法识别` if any text is visible.
 
 ### 图片 vs 动图 classification
 
@@ -330,7 +339,7 @@ tagged `[动图]`. But it's correct ~95% of the time and trivially fast.
 | Type | Output |
 |------|--------|
 | Text | plain text |
-| Image (with index + description) | `[图片] ![](images/.../id_t.jpg)\n> 描述: …` |
+| Image (with index + description) | `[图片: …描述…] ![](images/.../id_t.jpg)` (inline) |
 | Image (fallback, no index) | `[图片]` |
 | Animated sticker | `[动图] ![](images/.../id_t.jpg)` (no description) |
 | Voice | `[语音 9s] transcribed text <!-- correction: X→Y -->` |
@@ -339,12 +348,38 @@ tagged `[动图]`. But it's correct ~95% of the time and trivially fast.
 | Official Account | `[公众号 \| Name] title` |
 | Mini Program | `[小程序 \| Name] title` |
 | File | `[文件] filename` |
-| Transfer | `[转账 ¥0.68]` |
+| Transfer (mine — sent or any state) | `[转账 ¥X]` (subject = always just the amount) |
+| Transfer (contact accepted, pst=3/8) | `[已收钱 ¥X]` |
+| Transfer (contact returned, pst=4 paired w/ pst=9) | `[已退回 ¥X]` |
+| Transfer (contact-incoming pending, pst=4) | `[请收钱 ¥X]` |
+| Transfer (contact rejected, pst=5) | `[已被拒收 ¥X]` |
 | Red Packet | `[红包 note]` |
 | Link | `[链接] title` |
 | Call | `[语音通话 120s]` / `[视频通话 未接通]` |
 | Quote Reply | text + `> quoted` (nested, with sender + time) |
 | System | *italic* |
+
+### Transfer (转账) rendering rule — subject vs object
+
+A WeChat transfer event produces multiple DB rows with the same `transcationid`
+(initiation + state updates). We render **each row independently** (no dedup) but
+choose the label based on **who authored the row** (the message's `real_sender_id`
+mapped via `Name2Id`):
+
+- **My rows (is_me = True)**: always `[转账 ¥X]` regardless of `paysubtype`.
+  The user is the subject of the chat export — system status updates like "已被领取" /
+  "已退还" on my side are conveyed by the *contact's* paired row instead.
+- **Contact's rows (is_me = False)**: label per `paysubtype`:
+  - `3` / `8` → `已收钱`
+  - `4` → `请收钱`, BUT if the same `transcationid` has a paired pst=9 row (my-side
+    refund notification), relabel to `已退回`. This is what makes refunds explicit
+    on the contact's side. The refund-tid set is built by a pre-scan in
+    `_build_refund_tids()` before the main loop.
+  - `5` → `已被拒收`
+  - else → `转账`
+
+`<des>` is NOT perspective-aware (always "收到转账X元..." legacy fallback) — do NOT
+use it as the rendered text. `<feedesc>` is authoritative for the amount.
 
 ---
 
@@ -364,8 +399,9 @@ tagged `[动图]`. But it's correct ~95% of the time and trivially fast.
 | `find_image_key.py` brute force fails | Confirm `--account-folder` value ends in 4 hex chars; that suffix is the search constraint |
 | Decrypt probe "no recognized format magic" | Wrong AES key OR wrong attach folder. Recheck the MD5 of the contact's wxid and the brute-force output. |
 | Image descriptions JSON won't parse | An agent emitted unescaped quotes — recover with line-by-line regex parsing (see Step 4e) |
-| `[图片]` not embedding despite description being present | Description JSON must be keyed by md5(decrypted-content), **not** by the filename basename. Filenames use a different hash. |
-| Many `[图片]` messages with no embed | Coverage is naturally ~70% — Weixin auto-cleans old image files on disk. Nothing to do; the messages remain as bare `[图片]`. |
+| `[图片]` not embedding despite description being present | Description JSON must be keyed by md5(decrypted-content), **not** by the filename basename. Filenames use a different hash. The XML's md5 attribute equals md5(decrypted ORIGINAL file) — NOT md5(HD). `build_image_index.py` indexes all three variants (thumb/hd/orig) under their respective md5s, so any of them matches. |
+| Many `[图片]` messages with no embed | Coverage is naturally ~70% — Weixin auto-cleans old originals from disk for older chats, leaving thumb-only groups whose thumb md5 ≠ XML md5. Nothing to do client-side; the messages remain as bare `[图片]`. |
+| Transfer rendering shows "已退还" on my side instead of "已退回" on contact's side | Old behavior. The new rule: my (subject) rows always show plain `[转账 ¥X]`; contact's (object) row shows the state. For refunds, pst=4 contact-row is relabeled `已退回` when paired with a my-side pst=9. |
 
 ---
 

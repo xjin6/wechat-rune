@@ -261,8 +261,15 @@ def _format_refermsg(refermsg, prefix=">", nick_map=None) -> str:
 _IMG_MD5_RE = re.compile(r'\bmd5="([a-f0-9]{32})"')
 _IMG_ORIGSRC_RE = re.compile(r'\boriginsourcemd5="([a-f0-9]*)"')
 
+def _xml_text(root, tag):
+    if root is None: return ""
+    el = root.find(f".//{tag}")
+    if el is None or el.text is None: return ""
+    return el.text.strip()
+
 def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = None,
-               nick_map: dict = None, image_map: dict = None):
+               nick_map: dict = None, image_map: dict = None,
+               is_me: bool = False, refund_tids: set = None):
     text = _decode_raw(hex_str)
     is_system = False
 
@@ -277,18 +284,14 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
                 entry = image_map.get("by_orig_md5", {}).get(m.group(1))
                 if entry:
                     thumb = entry.get("thumb")
-                    # 区分:
-                    #   originsourcemd5 非空 = 用户上传的内容（照片/截图）→ [图片]
-                    #   originsourcemd5 为空 = 微信自带/表情/动图 → [动图]
                     osrc = _IMG_ORIGSRC_RE.search(text or "")
                     is_animated = bool(osrc and not osrc.group(1))
-                    tag = "[动图]" if is_animated else "[图片]"
+                    kind = "动图" if is_animated else "图片"
                     desc = (image_map.get("descriptions") or {}).get(m.group(1), "")
+                    tag = f"[{kind}: {desc}]" if desc else f"[{kind}]"
                     if thumb:
-                        rel = f"images/{thumb}"
-                        if desc:
-                            return f"{tag} ![]({rel})\n> 描述: {desc}", False
-                        return f"{tag} ![]({rel})", False
+                        return f"{tag} ![](images/{thumb})", False
+                    return tag, False
         return "[图片]", False
     elif local_type == 34:
         root = _parse_xml(text)
@@ -345,9 +348,39 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
             label = {5:"公众号",6:"文件",8:"表情",19:"聊天记录",33:"小程序",36:"小程序",
                      62:"互动",2000:"转账",2001:"红包"}.get(subtype, "链接")
             if subtype == 2000:
-                feedesc_el = root.find(".//feedesc")
-                amount = (feedesc_el.text or "").strip() if feedesc_el is not None else ""
-                return (f"[转账 {amount}]" if amount else "[转账]"), False
+                # Author rule: I'm the subject, contact is the object.
+                #   is_me  → just "[转账 ¥X]" (the act of transferring)
+                #   !is_me → contact's reaction (state per pst)
+                # <des> is NOT perspective-aware (legacy fallback string), so we
+                # synthesize from paysubtype. pst=4 means "money waiting to be
+                # collected by me" — for an incoming-pending that's "请收钱",
+                # but for a refund (same tid also has pst=9) it's "已退回".
+                amount = _xml_text(root, "feedesc")
+                memo   = _xml_text(root, "pay_memo")
+                pst_s  = _xml_text(root, "paysubtype")
+                tid    = _xml_text(root, "transcationid")
+                try:
+                    pst = int(pst_s) if pst_s else -1
+                except ValueError:
+                    pst = -1
+                if is_me:
+                    label = "转账"
+                else:
+                    if pst in (3, 8):
+                        label = "已收钱"
+                    elif pst == 4:
+                        if refund_tids and tid in refund_tids:
+                            label = "已退回"
+                        else:
+                            label = "请收钱"
+                    elif pst == 5:
+                        label = "已被拒收"
+                    else:
+                        label = "转账"
+                parts = [label]
+                if amount: parts.append(amount)
+                if memo:   parts.append(f"备注:{memo}")
+                return f"[{' '.join(parts)}]", False
             if subtype == 2001:
                 memo = ""
                 for tag_name in ("sendertitle", "pay_memo"):
@@ -401,6 +434,49 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
     return None, False
 
 
+# ── Refund-tid pre-scan ───────────────────────────────────────────
+
+_PST9_RE = re.compile(r'<paysubtype>(?:<!\[CDATA\[)?9')
+_TID_RE  = re.compile(r'<transcationid>(?:<!\[CDATA\[)?([^<\]]+)')
+
+def _build_refund_tids(keys: dict, db_dir: str, table: str) -> set:
+    """Return set of transcationids that had a pst=9 row. Used to relabel the
+    paired contact-side pst=4 message from '请收钱' to '已退回'."""
+    msg_db_dir = os.path.join(db_dir, "message")
+    if not os.path.isdir(msg_db_dir):
+        return set()
+    db_files = sorted(
+        [f for f in os.listdir(msg_db_dir) if re.match(r"message_\d+\.db$", f)],
+        key=lambda x: int(re.search(r"\d+", x).group())
+    )
+    result: set[str] = set()
+    for db_name in db_files:
+        db_path = os.path.join(msg_db_dir, db_name)
+        key_pat = f"message/{db_name}"
+        key = next((v for k, v in keys.items() if key_pat in k.replace("\\", "/")), "")
+        if not key: continue
+        has = sqlcipher_query(db_path, key,
+            f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}';")
+        if not has: continue
+        rows = sqlcipher_query(db_path, key,
+            f"SELECT hex(message_content) FROM {table} WHERE local_type % 65536 = 49;")
+        for row in rows:
+            if not row or not row[0]: continue
+            try: content = bytes.fromhex(row[0])
+            except Exception: continue
+            if not content: continue
+            if content[:4] == b"\x28\xb5\x2f\xfd":
+                try: xml = zstandard.decompress(content).decode("utf-8", errors="replace")
+                except Exception: continue
+            else:
+                xml = content.decode("utf-8", errors="replace")
+            if not _PST9_RE.search(xml): continue
+            tm = _TID_RE.search(xml)
+            if tm:
+                result.add(tm.group(1).strip())
+    return result
+
+
 # ── Build nickname map ────────────────────────────────────────────
 
 def _build_nick_map(keys_file: str, db_dir: str, my_wxid: str) -> dict:
@@ -426,6 +502,9 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
 
     my_wxid, _ = detect_wxid_and_db_dir(keys_file)
     nick_map   = _build_nick_map(keys_file, db_dir, my_wxid)
+    refund_tids = _build_refund_tids(keys, db_dir, table)
+    if refund_tids:
+        print(f"Detected refund transcationid(s): {len(refund_tids)}")
 
     # All message_N.db files
     msg_db_dir = os.path.join(db_dir, "message")
@@ -475,7 +554,10 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
                 sender_id = int(row[1])
                 local_type = int(row[3])
                 svr_id    = int(row[4]) if row[4] else 0
-                text, is_system = format_msg(row[2], local_type, voice_map=voice_map, ts=ts, nick_map=nick_map, image_map=image_map)
+                is_me_flag = sender_id in my_sender_ids
+                text, is_system = format_msg(row[2], local_type, voice_map=voice_map,
+                                             ts=ts, nick_map=nick_map, image_map=image_map,
+                                             is_me=is_me_flag, refund_tids=refund_tids)
                 if text is None:
                     continue
                 # Suppress WeChat's "update app" placeholder for unsupported message types
@@ -484,7 +566,7 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
                 if svr_id in seen:
                     continue
                 seen.add(svr_id)
-                is_me = None if is_system else (sender_id in my_sender_ids)
+                is_me = None if is_system else is_me_flag
                 all_msgs.append((ts, is_me, text))
             except Exception:
                 pass
