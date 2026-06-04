@@ -383,6 +383,108 @@ use it as the rendered text. `<feedesc>` is authoritative for the amount.
 
 ---
 
+## Step 5: Incremental Updates (for subsequent runs)
+
+After the initial full export, subsequent updates should be incremental — only do
+the work that's needed for new content. A typical "add the last week" update
+finishes in 5–10 minutes instead of 1+ hour.
+
+### 5a. Before re-extracting keys: open every chat
+
+Critical: **open Weixin and click into every contact you'll update before key
+extraction**. Each `message_N.db` shard only has its PRAGMA key in memory after
+WeChat has opened a chat that lives in that shard. Skip this and the affected
+shard's contact data appears to vanish from the DB (sqlite_master shows 0
+`Msg_*` tables for that shard). See Troubleshooting.
+
+After the user confirms they've clicked through:
+
+```bash
+python scripts/keys/extract_key_windows.py
+```
+
+### 5b. Diff diagnostic
+
+Compute per-contact deltas in one shot:
+
+```bash
+python scripts/incremental_diff.py "<relationship_root>" \
+  "wxid_<contact1>:<label1>" "wxid_<contact2>:<label2>"
+```
+
+Output tells you exactly what work is needed — 0 voices new for one contact,
+35 image MD5s new for another, etc. Skip dimensions where the delta is 0.
+
+### 5c. Voice transcription (resume mode)
+
+`transcribe_voices.py` natively supports resume — pass the same `--out` path and
+it loads the existing voice_map, skips entries already present, and only
+transcribes net-new timestamps:
+
+```bash
+python scripts/transcribe_voices.py --name "nickname" --model medium \
+  --out path/to/existing/voice_map.json
+```
+
+Stale entries (voice_map keys not in current DB after a phone re-import) stay
+in the file — harmless, the export script just doesn't reference them.
+
+### 5d. AI-correct only the net-new voices
+
+Don't re-process already-corrected entries. Identify net-new by diffing
+against the prior `voice_batches/vbatch_*.json` files (their keys are the
+previous voice_map state):
+
+```python
+prior_keys = set()
+for p in sorted(glob.glob("voice_batches/vbatch_*.json")):
+    prior_keys.update(json.load(open(p)).keys())
+new_entries = {k: v for k, v in voice_map.items() if k not in prior_keys}
+# Stage to /tmp/<contact>_voice_new.json → run correction agent on it
+```
+
+Then dispatch a workflow: **correct → adversarially verify**. The verifier
+catches false positives (e.g. forced "用研" where context was actually about
+literal "eye use"). Don't skip the verify pass — Whisper-medium homophone
+correction has ~5–15% false-positive rate without it.
+
+### 5e. Images: decrypt, rebuild, diff descriptions
+
+`decrypt_images.py` is idempotent — re-running over the same out-dir processes
+new `.dat` files only:
+
+```bash
+python scripts/decrypt_images.py --attach-dir "<contact_md5_folder>" \
+  --out-dir "<contact>/images" --aes-key "<aes_key>"
+```
+
+Then rebuild index + describe_list, then diff describe_list md5s against
+existing `image_descriptions.json` keys:
+
+```python
+described = json.load(open("image_descriptions.json"))
+desc_list = json.load(open("describe_list.json"))
+new = [d for d in desc_list if d["content_md5"] not in described]
+```
+
+For small deltas (< 20 images), one agent handles it. Larger → split into
+4–8 batches and use the standard parallel-agents prompt from Step 4e.
+
+### 5f. Re-export
+
+```bash
+python scripts/export_chat.py --name "nickname" --out <output.md> \
+  --voice-json voice_map.json --image-index image_index.json \
+  --image-descriptions image_descriptions.json
+```
+
+The export is fast (5–30 sec) and uses whichever JSON files you've updated.
+Final message counts may not equal "old + new" — phone re-imports can cause
+message renumbering or trim old archived messages. That's expected; don't try
+to reconcile.
+
+---
+
 ## Troubleshooting
 
 | Problem | Solution |
@@ -402,6 +504,10 @@ use it as the rendered text. `<feedesc>` is authoritative for the amount.
 | `[图片]` not embedding despite description being present | Description JSON must be keyed by md5(decrypted-content), **not** by the filename basename. Filenames use a different hash. The XML's md5 attribute equals md5(decrypted ORIGINAL file) — NOT md5(HD). `build_image_index.py` indexes all three variants (thumb/hd/orig) under their respective md5s, so any of them matches. |
 | Many `[图片]` messages with no embed | Coverage is naturally ~70% — Weixin auto-cleans old originals from disk for older chats, leaving thumb-only groups whose thumb md5 ≠ XML md5. Nothing to do client-side; the messages remain as bare `[图片]`. |
 | Transfer rendering shows "已退还" on my side instead of "已退回" on contact's side | Old behavior. The new rule: my (subject) rows always show plain `[转账 ¥X]`; contact's (object) row shows the state. For refunds, pst=4 contact-row is relabeled `已退回` when paired with a my-side pst=9. |
+| `incremental_diff.py` shows `⚠ shard message_N.db: contact's Msg_ table not present` | Weixin hadn't opened a chat in that shard when you ran key extraction, so its PRAGMA key isn't in memory and the encrypted DB can't be read. Open Weixin → click into the affected contact's chat → scroll a few messages → re-run `extract_key_windows.py` → re-run the diff. The shard's contact data will reappear. |
+| Re-extract returns fewer keys than before | Same root cause as above. Weixin only loads a shard's key when its chat opens. After phone-import + restart, click every contact you'll update before extracting. |
+| `transcribe_voices.py` reports `433/93 succeeded, 0s` (instant exit) | Resume mode found N existing entries and re-scanned the DB in a transient state (some shards missing). The script saw fewer voice messages than the voice_map already had, so nothing to do. Click into the relevant chats, re-extract keys, then re-run — it'll find the real new entries. |
+| voice_map has "stale" entries (in map but not in DB) after phone re-import | Harmless. Phone re-imports occasionally renumber/replace messages, so old transcribed ts no longer map to any current message. The export script just doesn't reference them. Leave them in; they're cheap to keep and you might want them back. |
 
 ---
 
@@ -470,3 +576,4 @@ by an md5 prefix) is small. See `scripts/find_image_key.py`.
 | `scripts/decrypt_images.py` | Bulk decrypt V2 `.dat` images to JPG/PNG/HEVC |
 | `scripts/build_image_index.py` | Build content-md5 → file-path index after bulk decrypt |
 | `scripts/build_describe_list.py` | Filter `[图片]` (non-animated) image messages into a flat list for AI description |
+| `scripts/incremental_diff.py` | Per-contact delta diagnostic for Step 5 (incremental updates) — reports new voices / images / .dat counts vs existing artifacts |
