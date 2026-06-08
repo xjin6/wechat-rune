@@ -9,7 +9,20 @@ Run before any incremental update to see per-contact deltas:
 
 Usage:
   python scripts/incremental_diff.py <relationship_root> <wxid:label> [<wxid:label> ...]
-  # relationship_root = the dir that has <label>/ subdirs (voice_map / image_descriptions / images)
+  # relationship_root expects this per-contact layout (the cache JSONs live in
+  # the archive subfolder; images/ stays alongside the .md so markdown refs
+  # resolve as-is). Legacy flat layout (all JSONs at <label>/ top level) is
+  # still accepted as a fallback.
+  #   <label>/
+  #     <label>_wechat.md
+  #     images/
+  #     <label>_archive/
+  #       <label>_voice_map.json
+  #       image_index.json
+  #       image_descriptions.json
+  #       describe_list.json
+  #       describe_batches/
+  #       voice_batches/
 
 Example:
   python scripts/incremental_diff.py "C:/Users/jxi/.../relationship" \\
@@ -111,7 +124,16 @@ def report(label: str, wxid: str, rel_root: str, keys: dict, db_dir: str, attach
     for s in stats["shards_missing"]:
         print(f"  ⚠ shard {s}: contact's Msg_ table not present (open this chat in Weixin and re-extract)")
 
-    vmap_path = os.path.join(rel_root, label, f"{label}_voice_map.json")
+    # Cache JSONs live under <label>/<label>_archive/. Fall back to the legacy
+    # flat layout (<label>/) for backward compat with un-migrated contacts.
+    archive_dir = os.path.join(rel_root, label, f"{label}_archive")
+    legacy_dir  = os.path.join(rel_root, label)
+
+    def _cache(filename: str) -> str:
+        new = os.path.join(archive_dir, filename)
+        return new if os.path.exists(new) else os.path.join(legacy_dir, filename)
+
+    vmap_path = _cache(f"{label}_voice_map.json")
     if os.path.exists(vmap_path):
         vmap = json.load(open(vmap_path, encoding="utf-8"))
         new_v = stats["voice_ts"] - set(vmap.keys())
@@ -120,8 +142,8 @@ def report(label: str, wxid: str, rel_root: str, keys: dict, db_dir: str, attach
     else:
         print(f"  voice_map: MISSING — full transcription of {len(stats['voice_ts'])} entries needed")
 
-    idx_path = os.path.join(rel_root, label, "image_index.json")
-    desc_path = os.path.join(rel_root, label, "image_descriptions.json")
+    idx_path = _cache("image_index.json")
+    desc_path = _cache("image_descriptions.json")
     if os.path.exists(idx_path) and os.path.exists(desc_path):
         idx = json.load(open(idx_path, encoding="utf-8"))
         desc = json.load(open(desc_path, encoding="utf-8"))
@@ -133,6 +155,7 @@ def report(label: str, wxid: str, rel_root: str, keys: dict, db_dir: str, attach
 
     contact_md5 = hashlib.md5(wxid.encode()).hexdigest()
     src_dir = os.path.join(attach_root, contact_md5)
+    # images/ stays alongside the .md (not in archive) so md image refs work as-is
     out_dir = os.path.join(rel_root, label, "images")
     n_src = sum(len(fs) for _, _, fs in os.walk(src_dir)) if os.path.isdir(src_dir) else 0
     n_out = sum(len(fs) for _, _, fs in os.walk(out_dir)) if os.path.isdir(out_dir) else 0

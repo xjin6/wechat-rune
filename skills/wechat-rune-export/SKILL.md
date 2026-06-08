@@ -389,6 +389,30 @@ After the initial full export, subsequent updates should be incremental — only
 the work that's needed for new content. A typical "add the last week" update
 finishes in 5–10 minutes instead of 1+ hour.
 
+### Per-contact folder layout
+
+The incremental tooling expects this layout for each contact (the cache JSONs
+and batch intermediates live in an `<label>_archive/` subfolder so the contact
+folder itself stays clean; `images/` stays alongside the `.md` so the embedded
+`![](images/...)` paths work as-is):
+
+```
+<relationship_root>/
+  <label>/
+    <label>_wechat.md           # the export itself
+    images/                     # decrypted images (referenced inline by the md)
+    <label>_archive/            # all cache + intermediates
+      <label>_voice_map.json
+      image_index.json
+      image_descriptions.json
+      describe_list.json
+      describe_batches/
+      voice_batches/
+```
+
+`incremental_diff.py` also accepts the legacy flat layout (cache JSONs directly
+under `<label>/`) as a fallback, so un-migrated contacts keep working.
+
 ### 5a. Before re-extracting keys: open every chat
 
 Critical: **open Weixin and click into every contact you'll update before key
@@ -432,12 +456,12 @@ in the file — harmless, the export script just doesn't reference them.
 ### 5d. AI-correct only the net-new voices
 
 Don't re-process already-corrected entries. Identify net-new by diffing
-against the prior `voice_batches/vbatch_*.json` files (their keys are the
-previous voice_map state):
+against the prior `<label>_archive/voice_batches/vbatch_*.json` files (their
+keys are the previous voice_map state):
 
 ```python
 prior_keys = set()
-for p in sorted(glob.glob("voice_batches/vbatch_*.json")):
+for p in sorted(glob.glob(f"{label}_archive/voice_batches/vbatch_*.json")):
     prior_keys.update(json.load(open(p)).keys())
 new_entries = {k: v for k, v in voice_map.items() if k not in prior_keys}
 # Stage to /tmp/<contact>_voice_new.json → run correction agent on it
