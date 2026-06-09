@@ -252,7 +252,14 @@ def _format_refermsg(refermsg, prefix=">", nick_map=None) -> str:
             body = raw
     if len(body) > 80:
         body = body[:80] + "…"
-    result = meta_line + f"{prefix} {body}" if body else meta_line.rstrip()
+    if body:
+        # body may contain newlines (the quoted message was multi-line);
+        # every line needs the blockquote prefix or lines after the first
+        # fall outside the quote block in rendered Markdown.
+        quoted = "\n".join(f"{prefix} {ln}" for ln in body.split("\n"))
+        result = meta_line + quoted
+    else:
+        result = meta_line.rstrip()
     if nested:
         result += "\n" + nested
     return result
@@ -290,7 +297,10 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
                     desc = (image_map.get("descriptions") or {}).get(m.group(1), "")
                     tag = f"[{kind}: {desc}]" if desc else f"[{kind}]"
                     if thumb:
-                        return f"{tag} ![](images/{thumb})", False
+                        # Image on its own line, description underneath — keeps
+                        # the thumbnail and its (often long) description from
+                        # crowding onto the same line.
+                        return f"![](images/{thumb})\n{tag}", False
                     return tag, False
         return "[图片]", False
     elif local_type == 34:
