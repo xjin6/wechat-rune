@@ -155,6 +155,22 @@ def search_contacts(keys_file: str, db_dir: str, name_query: str, group: bool = 
     return results
 
 
+def resolve_nickname(keys_file: str, db_dir: str, wxid: str) -> str:
+    """Reverse-lookup a contact's WeChat nickname by wxid (not personal remark),
+    so --wxid exports show the same display name as --name."""
+    keys = json.load(open(keys_file))
+    key  = next((v for k, v in keys.items()
+                 if "contact/contact.db" in k.replace("\\", "/")), "")
+    if not key:
+        return ""
+    contact_db = os.path.join(db_dir, "contact", "contact.db")
+    rows = sqlcipher_query(contact_db, key,
+        f"SELECT nick_name FROM contact WHERE username = '{wxid}' LIMIT 1;")
+    if rows and rows[0] and rows[0][0]:
+        return rows[0][0].strip()
+    return ""
+
+
 # ── Message decoding ──────────────────────────────────────────────
 
 def _decode_raw(hex_str: str) -> str:
@@ -630,7 +646,9 @@ def main():
     my_wxid, db_dir  = detect_wxid_and_db_dir(keys_file)
 
     if args.wxid:
-        target_wxid, display_name = args.wxid, args.wxid
+        target_wxid = args.wxid
+        display_name = resolve_nickname(keys_file, db_dir, target_wxid) or target_wxid
+        print(f"Resolved: {display_name} ({target_wxid})")
     else:
         results = search_contacts(keys_file, db_dir, args.name, group=args.group)
         if not results:
