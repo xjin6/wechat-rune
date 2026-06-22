@@ -350,12 +350,11 @@ tagged `[动图]`. But it's correct ~95% of the time and trivially fast.
 | File | `[文件] filename` |
 | Transfer (mine — sent or any state) | `[转账 ¥X]` (subject = always just the amount) |
 | Transfer (contact accepted, pst=3/8) | `[已收钱 ¥X]` |
-| Transfer (contact returned, pst=4 paired w/ pst=9) | `[已退回 ¥X]` |
-| Transfer (contact-incoming pending, pst=4) | `[请收钱 ¥X]` |
+| Transfer (contact returned, pst=4) | `[已退回 ¥X]` |
 | Transfer (contact rejected, pst=5) | `[已被拒收 ¥X]` |
 | Red Packet | `[红包 note]` |
 | Link | `[链接] title` |
-| Call | `[语音通话 120s]` / `[视频通话 未接通]` |
+| Call (VoIP) | `[语音通话 08:12 · 20:11:45→20:20:11]` / `[视频通话 38:39 · …]` / `[语音通话 无人接听 · …]` / `对方拒接` / `已取消` / `对方取消` / `占线未接` / `对方在其他设备接听` (see Call rendering rule) |
 | Quote Reply | text + `> quoted` (nested, with sender + time) |
 | System | *italic* |
 
@@ -367,19 +366,52 @@ choose the label based on **who authored the row** (the message's `real_sender_i
 mapped via `Name2Id`):
 
 - **My rows (is_me = True)**: always `[转账 ¥X]` regardless of `paysubtype`.
-  The user is the subject of the chat export — system status updates like "已被领取" /
-  "已退还" on my side are conveyed by the *contact's* paired row instead.
-- **Contact's rows (is_me = False)**: label per `paysubtype`:
+  The user is the subject of the chat export — the settled outcome is conveyed by
+  the *contact's* paired row instead.
+- **Contact's rows (is_me = False)**: the contact's **real, settled status**, read
+  straight from `paysubtype`. Key fact: a contact-side transfer row **only exists
+  once the contact has acted** on the transfer — a still-pending "请收钱" produces
+  *no* contact row at all. So every contact `pst` maps to a final outcome, never a
+  pending guess:
   - `3` / `8` → `已收钱`
-  - `4` → `请收钱`, BUT if the same `transcationid` has a paired pst=9 row (my-side
-    refund notification), relabel to `已退回`. This is what makes refunds explicit
-    on the contact's side. The refund-tid set is built by a pre-scan in
-    `_build_refund_tids()` before the main loop.
+  - `4` → `已退回` (the contact returned the transfer — unconditional; do **not**
+    depend on a paired my-side pst=9, which is just the refund-received receipt and
+    is often missing/trimmed)
   - `5` → `已被拒收`
   - else → `转账`
 
 `<des>` is NOT perspective-aware (always "收到转账X元..." legacy fallback) — do NOT
 use it as the rendered text. `<feedesc>` is authoritative for the amount.
+
+### Call (VoIP / 语音视频通话) rendering rule
+
+A call is a `local_type==50` message: `<voipmsg><VoIPBubbleMsg>` whose fields are
+**child ELEMENTS** (not attributes — the original code read attributes and so
+collapsed every call to a bare `[通话]`). Authored by the **caller's** side.
+
+- **Media kind** ← `<room_type>`: `1` → `语音通话`, `0` → `视频通话`. This is the
+  ONLY media-kind signal (empirically confirmed: a known video call = `room_type=0`,
+  while a control set of audio-only calls = `room_type=1`).
+- **Outcome / duration** ← the `<msg>` CDATA text (English on an English client;
+  Chinese-client literals also matched). `<duration>` element is **always `0` —
+  never use it**; real talk time is the clock string inside `<msg>`:
+  - `Duration: MM:SS` / `HH:MM:SS` → connected; render the clock as-is (`08:12`)
+  - `Call wasn't answered` → `无人接听`
+  - `Call declined` → `对方拒接`
+  - `Canceled` → `已取消` (我方主叫取消)
+  - `Call canceled by caller` → `对方取消` (对方主叫后取消)
+  - `Line busy. Call not received.` → `占线未接`
+  - `Already answered elsewhere` (`<msg_type>==101`) → `对方在其他设备接听`
+- **Two timestamps** rendered as `起始→结果`: 结果 = the message's `create_time`
+  (hang-up/decline/timeout moment); 起始 = `<inviteid>` when it's a 10-digit epoch
+  (the real 拨出 time), else for a connected call derived as `结果 − 通话时长`
+  (≈接通起点). Non-connected states with no usable `inviteid` show only 结果.
+- **Direction** is the message author (already the `**HH:MM <sender>**` prefix);
+  `caller_memberid`/`callee_memberid` are fixed `0`/`1` and do NOT encode it.
+
+Final shape: `[语音通话 08:12 · 20:11:45→20:20:11]`, `[视频通话 38:39 · …]`,
+`[语音通话 无人接听 · 17:46:02→17:47:02]`. Logic lives in `_voip_status()` +
+the `local_type==50` branch of `format_msg`.
 
 ---
 
@@ -509,6 +541,37 @@ to reconcile.
 
 ---
 
+## Step 6: Sync to Obsidian wiki (image-less) — STANDARD FINAL STEP
+
+For this user, the exports live in **two places** with different roles:
+
+- **Workspace (source of truth)** `…/Vibe/relationship/<label>/` — the full
+  `<label>_wechat.md` **with** inline `![](images/…)` embeds + the `images/`
+  folder + the `<label>_archive/` caches. Keep everything here; future
+  incremental updates regenerate from it.
+- **Obsidian wiki (browse copy)** `…/Wiki/relationship/<label>/` — a
+  **no-image** version: image *descriptions* (`[图片: …]`) kept, but the
+  `![](images/…)` embeds stripped and **no `images/` folder** (the vault must not
+  carry tens/hundreds of MB of pictures).
+
+After ANY (re-)export, run the sync — it strips embeds, writes the no-image md to
+the wiki, and removes the wiki `images/` folder:
+
+```bash
+python scripts/sync_to_wiki.py                # auto-detect all contacts
+python scripts/sync_to_wiki.py mex jjwang     # or explicit labels
+python scripts/sync_to_wiki.py --keep-images  # text only, leave images
+```
+
+It NEVER touches hand-curated wiki files (`*_context.md`, `*_analysis.md`,
+`*_ledger.md`) or the workspace. Image embeds are always standalone lines, so the
+strip is exact. The image purge is resilient to OneDrive's transient folder locks
+(retries, then reports if empty dir skeletons linger — actual files/space are gone
+regardless). **Don't go back to the old "copy full md + robocopy images" sync** —
+that re-bloats the vault.
+
+---
+
 ## Troubleshooting
 
 | Problem | Solution |
@@ -527,7 +590,7 @@ to reconcile.
 | Image descriptions JSON won't parse | An agent emitted unescaped quotes — recover with line-by-line regex parsing (see Step 4e) |
 | `[图片]` not embedding despite description being present | Description JSON must be keyed by md5(decrypted-content), **not** by the filename basename. Filenames use a different hash. The XML's md5 attribute equals md5(decrypted ORIGINAL file) — NOT md5(HD). `build_image_index.py` indexes all three variants (thumb/hd/orig) under their respective md5s, so any of them matches. |
 | Many `[图片]` messages with no embed | Coverage is naturally ~70% — Weixin auto-cleans old originals from disk for older chats, leaving thumb-only groups whose thumb md5 ≠ XML md5. Nothing to do client-side; the messages remain as bare `[图片]`. |
-| Transfer rendering shows "已退还" on my side instead of "已退回" on contact's side | Old behavior. The new rule: my (subject) rows always show plain `[转账 ¥X]`; contact's (object) row shows the state. For refunds, pst=4 contact-row is relabeled `已退回` when paired with a my-side pst=9. |
+| Refunded transfer shows `请收钱` instead of `已退回` on the contact's side | Old behavior depended on a paired my-side pst=9 row, which is often missing/trimmed (e.g. only one of two refunds had it). Fixed: contact `pst=4` → `已退回` **unconditionally** (a contact row only exists once the contact acted, so pst=4 can only mean "returned", never "pending"). No pst=9 pre-scan anymore. |
 | `incremental_diff.py` shows `⚠ shard message_N.db: contact's Msg_ table not present` | Weixin hadn't opened a chat in that shard when you ran key extraction, so its PRAGMA key isn't in memory and the encrypted DB can't be read. Open Weixin → click into the affected contact's chat → scroll a few messages → re-run `extract_key_windows.py` → re-run the diff. The shard's contact data will reappear. |
 | Re-extract returns fewer keys than before | Same root cause as above. Weixin only loads a shard's key when its chat opens. After phone-import + restart, click every contact you'll update before extracting. |
 | `transcribe_voices.py` reports `433/93 succeeded, 0s` (instant exit) | Resume mode found N existing entries and re-scanned the DB in a transient state (some shards missing). The script saw fewer voice messages than the voice_map already had, so nothing to do. Click into the relevant chats, re-extract keys, then re-run — it'll find the real new entries. |

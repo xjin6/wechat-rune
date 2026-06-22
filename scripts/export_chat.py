@@ -290,9 +290,51 @@ def _xml_text(root, tag):
     if el is None or el.text is None: return ""
     return el.text.strip()
 
+
+def _voip_status(msg: str, mtype: str) -> str:
+    """Map a VoIP <msg> CDATA (+ <msg_type>) to a Chinese call status.
+    Connected calls return the clock duration as-is (e.g. '08:12' / '01:12:15');
+    every other outcome returns a state word. This account's client is English,
+    so we match the English literals; Chinese-client equivalents are kept for
+    forward-compat. Order matters: 'canceled by caller' (对方取消) must be tested
+    before plain 'Canceled' (我方已取消)."""
+    m = (msg or "").strip()
+    dm = re.search(r"(?:Duration:|通话时长)\s*([0-9:]+)", m)
+    if dm:
+        return dm.group(1)
+    return _voip_status_noncon(m, mtype)
+
+
+def _clock_to_secs(clock: str) -> int:
+    """'08:12' -> 492 ; '01:12:15' -> 4335 ; non-clock -> 0."""
+    parts = clock.split(":")
+    if len(parts) < 2 or not all(p.isdigit() for p in parts):
+        return 0
+    secs = 0
+    for p in parts:
+        secs = secs * 60 + int(p)
+    return secs
+
+
+def _voip_status_noncon(m: str, mtype: str) -> str:
+    low = m.lower()
+    if mtype == "101" or "answered elsewhere" in low or "其他设备" in m:
+        return "对方在其他设备接听"
+    if "canceled by caller" in low or "对方已取消" in m or "对方取消" in m:
+        return "对方取消"
+    if "wasn't answered" in low or "未接听" in m or "无人接听" in m:
+        return "无人接听"
+    if "declined" in low or "已拒绝" in m or "拒接" in m:
+        return "对方拒接"
+    if "line busy" in low or "占线" in m or "忙线" in m:
+        return "占线未接"
+    if low == "canceled" or m == "已取消":
+        return "已取消"
+    return m  # unknown outcome — surface the raw text rather than hide it
+
 def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = None,
                nick_map: dict = None, image_map: dict = None,
-               is_me: bool = False, refund_tids: set = None):
+               is_me: bool = False):
     text = _decode_raw(hex_str)
     is_system = False
 
@@ -376,15 +418,14 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
             if subtype == 2000:
                 # Author rule: I'm the subject, contact is the object.
                 #   is_me  → just "[转账 ¥X]" (the act of transferring)
-                #   !is_me → contact's reaction (state per pst)
-                # <des> is NOT perspective-aware (legacy fallback string), so we
-                # synthesize from paysubtype. pst=4 means "money waiting to be
-                # collected by me" — for an incoming-pending that's "请收钱",
-                # but for a refund (same tid also has pst=9) it's "已退回".
+                #   !is_me → contact's REAL status, read straight from paysubtype.
+                # A contact-side transfer row only exists once the contact has
+                # acted on it, so each pst maps to a settled outcome (never a
+                # "pending" guess): 3/8 收, 4 退回, 5 拒收. <des> is NOT
+                # perspective-aware (legacy fallback string) — don't use it.
                 amount = _xml_text(root, "feedesc")
                 memo   = _xml_text(root, "pay_memo")
                 pst_s  = _xml_text(root, "paysubtype")
-                tid    = _xml_text(root, "transcationid")
                 try:
                     pst = int(pst_s) if pst_s else -1
                 except ValueError:
@@ -395,10 +436,7 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
                     if pst in (3, 8):
                         label = "已收钱"
                     elif pst == 4:
-                        if refund_tids and tid in refund_tids:
-                            label = "已退回"
-                        else:
-                            label = "请收钱"
+                        label = "已退回"
                     elif pst == 5:
                         label = "已被拒收"
                     else:
@@ -423,18 +461,37 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
             return f"[{label}]", False
         return "[链接]", False
     elif local_type == 50:
+        # WeChat 4.x VoIP bubble: <voipmsg><VoIPBubbleMsg> with CHILD elements
+        # (the old code read them as attributes — they're elements, so it always
+        # fell through to "[通话]"). Fields that matter:
+        #   <msg> CDATA — the real outcome/duration text (English on this client)
+        #   <room_type> — 1 = 语音通话, 0 = 视频通话 (the only media-kind signal)
+        #   <msg_type>  — 100 normal, 101 = 多端"对方在其他设备接听"旁注
+        #   <inviteid>  — 拨出时刻 (10-digit epoch when present)
+        #   <duration>  — ALWAYS 0; never use it, talk time is inside <msg>
         root = _parse_xml(text)
-        if root is not None:
-            for el in root.iter():
-                duration = el.get("duration", "")
-                if duration:
-                    try:
-                        secs   = int(duration)
-                        invite = el.get("invitetype", el.get("msg_type", "0"))
-                        ctype  = "视频通话" if invite in ("1","3") else "语音通话"
-                        return (f"[{ctype} {secs}s]" if secs > 0 else f"[{ctype} 未接通]"), False
-                    except Exception:
-                        pass
+        if root is not None and root.find(".//VoIPBubbleMsg") is not None:
+            kind   = "视频通话" if _xml_text(root, "room_type") == "0" else "语音通话"
+            status = _voip_status(_xml_text(root, "msg"), _xml_text(root, "msg_type"))
+            body   = f"{kind} {status}" if status else kind
+            # two timestamps: 起始 → 结果. 结果 = this msg's create_time (挂断/拒接/
+            # 超时那一刻). 起始 prefers <inviteid> (真实拨出时刻, 10位 epoch); for a
+            # connected call that didn't store a usable inviteid, derive it from
+            # 结果 - 通话时长 (≈接通起点, within ring time of the real dial).
+            out_t  = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else ""
+            invite = _xml_text(root, "inviteid")
+            start_epoch = None
+            if invite.isdigit() and len(invite) == 10:
+                start_epoch = int(invite)
+            elif ts:
+                secs = _clock_to_secs(status)   # nonzero only for connected calls
+                if secs:
+                    start_epoch = ts - secs
+            dial_t = datetime.datetime.fromtimestamp(start_epoch).strftime("%H:%M:%S") if start_epoch else ""
+            span   = f"{dial_t}→{out_t}" if (dial_t and out_t) else out_t
+            if span:
+                body = f"{body} · {span}"
+            return f"[{body}]", False
         return "[通话]", False
     elif local_type == 10000:
         if text and not text.startswith("<"):
@@ -458,49 +515,6 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
                     return raw_text, True
         return None, False
     return None, False
-
-
-# ── Refund-tid pre-scan ───────────────────────────────────────────
-
-_PST9_RE = re.compile(r'<paysubtype>(?:<!\[CDATA\[)?9')
-_TID_RE  = re.compile(r'<transcationid>(?:<!\[CDATA\[)?([^<\]]+)')
-
-def _build_refund_tids(keys: dict, db_dir: str, table: str) -> set:
-    """Return set of transcationids that had a pst=9 row. Used to relabel the
-    paired contact-side pst=4 message from '请收钱' to '已退回'."""
-    msg_db_dir = os.path.join(db_dir, "message")
-    if not os.path.isdir(msg_db_dir):
-        return set()
-    db_files = sorted(
-        [f for f in os.listdir(msg_db_dir) if re.match(r"message_\d+\.db$", f)],
-        key=lambda x: int(re.search(r"\d+", x).group())
-    )
-    result: set[str] = set()
-    for db_name in db_files:
-        db_path = os.path.join(msg_db_dir, db_name)
-        key_pat = f"message/{db_name}"
-        key = next((v for k, v in keys.items() if key_pat in k.replace("\\", "/")), "")
-        if not key: continue
-        has = sqlcipher_query(db_path, key,
-            f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}';")
-        if not has: continue
-        rows = sqlcipher_query(db_path, key,
-            f"SELECT hex(message_content) FROM {table} WHERE local_type % 65536 = 49;")
-        for row in rows:
-            if not row or not row[0]: continue
-            try: content = bytes.fromhex(row[0])
-            except Exception: continue
-            if not content: continue
-            if content[:4] == b"\x28\xb5\x2f\xfd":
-                try: xml = zstandard.decompress(content).decode("utf-8", errors="replace")
-                except Exception: continue
-            else:
-                xml = content.decode("utf-8", errors="replace")
-            if not _PST9_RE.search(xml): continue
-            tm = _TID_RE.search(xml)
-            if tm:
-                result.add(tm.group(1).strip())
-    return result
 
 
 # ── Build nickname map ────────────────────────────────────────────
@@ -528,9 +542,6 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
 
     my_wxid, _ = detect_wxid_and_db_dir(keys_file)
     nick_map   = _build_nick_map(keys_file, db_dir, my_wxid)
-    refund_tids = _build_refund_tids(keys, db_dir, table)
-    if refund_tids:
-        print(f"Detected refund transcationid(s): {len(refund_tids)}")
 
     # All message_N.db files
     msg_db_dir = os.path.join(db_dir, "message")
@@ -583,7 +594,7 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
                 is_me_flag = sender_id in my_sender_ids
                 text, is_system = format_msg(row[2], local_type, voice_map=voice_map,
                                              ts=ts, nick_map=nick_map, image_map=image_map,
-                                             is_me=is_me_flag, refund_tids=refund_tids)
+                                             is_me=is_me_flag)
                 if text is None:
                     continue
                 # Suppress WeChat's "update app" placeholder for unsupported message types

@@ -53,10 +53,25 @@ def detect_db_and_attach() -> tuple[str, str]:
     """Return (db_dir, attach_root) by inspecting any key path."""
     keys = json.load(open(find_keys_file()))
     sample = next(iter(keys.keys()))  # e.g. "magicxinjx_c092\\db_storage\\message\\message_0.db"
-    account_folder = sample.split("\\")[0]
     # Use XWECHAT_FILES detection from config.py
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from config import XWECHAT_FILES
+
+    # Windows-style key path includes the account folder as the first segment
+    # ("magicxinjx_c092\\db_storage\\message\\message_0.db"). Mac-style omits it
+    # ("message/message_0.db"). Detect by the path separator.
+    if "\\" in sample:
+        account_folder = sample.split("\\")[0]
+    else:
+        # Mac: scan XWECHAT_FILES for the account folder (the one containing db_storage)
+        try:
+            account_folder = next(
+                d for d in os.listdir(XWECHAT_FILES)
+                if os.path.isdir(os.path.join(XWECHAT_FILES, d, "db_storage"))
+            )
+        except (StopIteration, FileNotFoundError):
+            sys.exit(f"No xwechat account folder found under {XWECHAT_FILES}")
+
     base = os.path.join(XWECHAT_FILES, account_folder)
     return os.path.join(base, "db_storage"), os.path.join(base, "msg", "attach")
 
