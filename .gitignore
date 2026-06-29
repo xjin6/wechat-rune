@@ -1,5 +1,7 @@
 # Sensitive files
-scripts/keys/wechat_keys.json
+# NOTE: wechat_keys.json + wechat_keys_pool.json are intentionally TRACKED/published
+# by the repo owner — the keys are useless without the owner's local .db files, which
+# are never committed here.
 scripts/keys/all_keys.json
 db/
 .env

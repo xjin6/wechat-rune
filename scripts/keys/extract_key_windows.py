@@ -391,19 +391,19 @@ def main():
         print("    Tip: run this script as Administrator.")
         sys.exit(1)
 
-    # Build result with full paths as keys (matching how config.py and decrypt.py look them up)
-    result = {}
-    for rel, path, sz, salt, page1 in db_files:
-        if rel in key_map:
-            result[rel] = key_map[rel]
+    found = {rel: key_map[rel] for rel, path, sz, salt, page1 in db_files if rel in key_map}
 
-    out_path = os.path.join(os.path.dirname(__file__), "wechat_keys.json")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2)
+    # Append-only key store: NEVER overwrite/shrink wechat_keys.json. Keys accumulate
+    # in wechat_keys_pool.json (dedup) and the consumer file is re-resolved to whichever
+    # pooled candidate actually HMAC-validates each DB. A partial scan once wiped 18
+    # keys down to 2 — routing through keystore makes that impossible.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import keystore
+    resolved = keystore.add(found)
+    out_path = keystore.RESOLVED_PATH
 
-    print(f"\nSaved {len(result)} key(s) to: {out_path}")
-    for rel in result:
+    print(f"\nFound {len(found)} key(s) this scan; store now holds {len(resolved)} -> {out_path}")
+    for rel in found:
         print(f"  {rel}")
 
 

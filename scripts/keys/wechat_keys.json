@@ -1,0 +1,21 @@
+{
+  "magicxinjx_c092\\db_storage\\session\\session.db": "746c0de183d73b890980c668a1f098b2f8b5a669a173069a5ae68719eb8f315b",
+  "magicxinjx_c092\\db_storage\\message\\message_0.db": "6ef3ba3378488e178eda127c9efe9cfeaa2cb569206e6df25931e6cd5e810b91",
+  "magicxinjx_c092\\db_storage\\bizchat\\bizchat.db": "88003715b2b3b4f314a15cff7ba9b66ef6eee50dff6cb50764a089bf9d8cc8f5",
+  "magicxinjx_c092\\db_storage\\contact\\contact.db": "ce55d473a0bf0c8ea39879699284173a6fa07c2cd1d9229cbc53face3d31f9fc",
+  "magicxinjx_c092\\db_storage\\contact\\contact_fts.db": "662c0592e7d8a1b3cb5d6cec3b1884db06a879d86290a76708e5309e1f626c0b",
+  "magicxinjx_c092\\db_storage\\emoticon\\emoticon.db": "8d13c2a2e2c0998ef2e09a163930c5bbdc0a96810fe42ab542d2696db331d7e4",
+  "magicxinjx_c092\\db_storage\\favorite\\favorite.db": "1b8064ace1e2e1142e27d18d752fc135c7841a9f1fb581170ee4afec41a8eb53",
+  "magicxinjx_c092\\db_storage\\favorite\\favorite_fts.db": "dbbf9da976d08c5e01ec82a5ae52c61246e209022f3c5d4d0f5133891768ce14",
+  "magicxinjx_c092\\db_storage\\general\\general.db": "357f905ee02390b4954072514a734949d10d0ff6215aa0d06a2876d275dc963e",
+  "magicxinjx_c092\\db_storage\\hardlink\\hardlink.db": "1a403f68758899344293b2b2b464e8ab345491513444d957375834207ac9f7d2",
+  "magicxinjx_c092\\db_storage\\head_image\\head_image.db": "30872900f4609cde6f264afc8f873ee80d675d8cda61d88c05063571df2ade45",
+  "magicxinjx_c092\\db_storage\\message\\biz_message_0.db": "32af87a1d16af067fc88996e8c0873572a0e89196c34a43857d8211965d6d3e7",
+  "magicxinjx_c092\\db_storage\\message\\media_0.db": "0a9624b65511efa4fd4230d93692007db10e74774e6ea4aaf72daddc08a921c2",
+  "magicxinjx_c092\\db_storage\\message\\message_1.db": "d17a0d0a33077a3e5ff5f419ca747e2fcb1442a71212f9b68dc80630d747ffbe",
+  "magicxinjx_c092\\db_storage\\message\\message_fts.db": "415999ba5fb0013f9e160ab905d260d2798b349bdbe059848c0771687bf808ac",
+  "magicxinjx_c092\\db_storage\\message\\message_resource.db": "6ed8be1e8f9076a00efb6a24830dac9fd8927c61969688a638b8634c4ea5870a",
+  "magicxinjx_c092\\db_storage\\message\\weclaw.db": "d87a2b128cf64e1ff35557fd9a55037e45feb0ae0c5b2c9586909d43ea6b17f3",
+  "magicxinjx_c092\\db_storage\\sns\\sns.db": "88078f76d23e75c1d44aa697d23dac746b892d2f7e2bca32e10dfbc654c9ebd4",
+  "magicxinjx_c092\\db_storage\\solitaire\\solitaire.db": "52ebe15f339414b5f16518964a1e0a8d6142b03eb1f5dd453ac5dadfaf719ab8"
+}
