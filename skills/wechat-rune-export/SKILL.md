@@ -198,13 +198,13 @@ the heavy work, so failures are caught early.
 
 Each conversation's images live under
 `<xwechat_files>/<account>/msg/attach/<MD5(contact_wxid)>/<YYYY-MM>/Img/*.dat`.
-Compute the MD5 of the contact's wxid (the **real** wxid, e.g. `wxid_clslfiswnis422`,
+Compute the MD5 of the contact's wxid (the **real** wxid, e.g. `wxid_aaaaaaaaaaaa`,
 not the user-set 微信号), then point the next scripts at that folder.
 
 ```bash
 python -c "
 import hashlib
-print(hashlib.md5(b'wxid_clslfiswnis422').hexdigest())
+print(hashlib.md5(b'wxid_aaaaaaaaaaaa').hexdigest())
 "
 ```
 
@@ -219,12 +219,12 @@ from disk:
 - `xor_key = uin & 0xFF` — voted from a few V2 .dat files (their last byte XOR 0xD9
   always equals the xor_key because every JPEG ends with `FF D9`)
 - `md5(str(uin)).hexdigest()[:4]` equals the 4-hex suffix on the account folder
-  (e.g. `magicxinjx_c092` → suffix `c092`)
+  (e.g. `myaccount_a1b2` → suffix `c092`)
 
 ```bash
 python scripts/find_image_key.py \
   --attach-dir "<full path to MD5 folder>" \
-  --account-folder "magicxinjx_c092"
+  --account-folder "myaccount_a1b2"
 ```
 
 Expected output: `FOUND: uin=… aes_key=… xor_key=…` in <10 seconds. Save the
@@ -558,9 +558,10 @@ After ANY (re-)export, run the sync — it strips embeds, writes the no-image md
 the wiki, and removes the wiki `images/` folder:
 
 ```bash
-python scripts/sync_to_wiki.py                # auto-detect all contacts
-python scripts/sync_to_wiki.py mex jjwang     # or explicit labels
-python scripts/sync_to_wiki.py --keep-images  # text only, leave images
+# roots via --vibe-root/--wiki-root or env WECHAT_VIBE_ROOT/WECHAT_WIKI_ROOT
+python scripts/sync_to_wiki.py --vibe-root <relationship> --wiki-root <wiki>   # all contacts
+python scripts/sync_to_wiki.py alice bob --vibe-root <…> --wiki-root <…>       # explicit labels
+python scripts/sync_to_wiki.py --keep-images --vibe-root <…> --wiki-root <…>   # text only, keep images
 ```
 
 It NEVER touches hand-curated wiki files (`*_context.md`, `*_analysis.md`,

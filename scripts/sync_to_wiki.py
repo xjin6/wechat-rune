@@ -19,17 +19,18 @@ workspace. Image embeds in this pipeline are always on their own line (verified
 across both contacts), so line-deletion is exact — no inline embeds exist.
 
 Usage:
-  python scripts/sync_to_wiki.py                 # auto-detect all contacts
-  python scripts/sync_to_wiki.py mex jjwang      # explicit labels
+  python scripts/sync_to_wiki.py --vibe-root <relationship> --wiki-root <wiki>   # all contacts
+  python scripts/sync_to_wiki.py <label> [<label> ...] --vibe-root … --wiki-root …
   python scripts/sync_to_wiki.py --keep-images   # sync text but leave images
 
-Defaults point at this user's OneDrive layout; override with --vibe-root /
---wiki-root for a different machine.
+Roots come from --vibe-root / --wiki-root, or the env vars WECHAT_VIBE_ROOT /
+WECHAT_WIKI_ROOT. Nothing is hardcoded to a specific machine or contact.
 """
 import os, re, sys, glob, time, shutil, stat, argparse
 
-DEFAULT_VIBE = r"C:/Users/jxi/OneDrive - Microsoft/Vibe/relationship"
-DEFAULT_WIKI = r"C:/Users/jxi/OneDrive - Microsoft/Wiki/relationship"
+# No hardcoded paths/names — supply via --vibe-root/--wiki-root or these env vars.
+DEFAULT_VIBE = os.environ.get("WECHAT_VIBE_ROOT", "")
+DEFAULT_WIKI = os.environ.get("WECHAT_WIKI_ROOT", "")
 
 EMBED_LINE = re.compile(r"^!\[\]\(images/[^)]*\)\s*$")
 
@@ -110,6 +111,10 @@ def main() -> None:
     ap.add_argument("--keep-images", action="store_true",
                     help="Do not delete the wiki images/ folder")
     args = ap.parse_args()
+
+    if not args.vibe_root or not args.wiki_root:
+        sys.exit("Set --vibe-root and --wiki-root (or env WECHAT_VIBE_ROOT / "
+                 "WECHAT_WIKI_ROOT). No paths are hardcoded.")
 
     labels = args.labels or detect_labels(args.vibe_root)
     if not labels:

@@ -25,8 +25,8 @@ Usage:
   #       voice_batches/
 
 Example:
-  python scripts/incremental_diff.py "C:/Users/jxi/.../relationship" \\
-    "wxid_u5ejnrlk2mn122:mex" "wxid_clslfiswnis422:jjwang"
+  python scripts/incremental_diff.py "<relationship root>" \\
+    "wxid_aaaaaaaaaaaa:alice" "wxid_bbbbbbbbbbbb:bob"
 
 No mutations — pure reporting. The actual incremental updates use:
   - transcribe_voices.py --out <existing_path>  (native resume mode)
@@ -52,13 +52,13 @@ def find_keys_file() -> str:
 def detect_db_and_attach() -> tuple[str, str]:
     """Return (db_dir, attach_root) by inspecting any key path."""
     keys = json.load(open(find_keys_file()))
-    sample = next(iter(keys.keys()))  # e.g. "magicxinjx_c092\\db_storage\\message\\message_0.db"
+    sample = next(iter(keys.keys()))  # e.g. "myaccount_a1b2\\db_storage\\message\\message_0.db"
     # Use XWECHAT_FILES detection from config.py
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from config import XWECHAT_FILES
 
     # Windows-style key path includes the account folder as the first segment
-    # ("magicxinjx_c092\\db_storage\\message\\message_0.db"). Mac-style omits it
+    # ("myaccount_a1b2\\db_storage\\message\\message_0.db"). Mac-style omits it
     # ("message/message_0.db"). Detect by the path separator.
     if "\\" in sample:
         account_folder = sample.split("\\")[0]

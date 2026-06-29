@@ -7,7 +7,7 @@ Constraint (from wx-cli/src/attachment/image_key/macos.rs derive_image_key_mater
 
 We already know:
   - xor_key = derived from .dat files (last byte ^ 0xD9 voting)
-  - wxid suffix = the 4 hex chars from the account folder name (e.g., "c092" in "magicxinjx_c092")
+  - wxid suffix = the 4 hex chars from the account folder name (e.g., "c092" in "myaccount_a1b2")
     and md5(str(uin)).hexdigest()[:4] should == that suffix
 
 So search space is uin where (uin & 0xFF == xor_key) AND (md5(str(uin))[:4] == suffix).
@@ -98,7 +98,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--attach-dir", required=True)
     ap.add_argument("--account-folder", required=True,
-                    help="Like 'magicxinjx_c092' — the folder under xwechat_files/")
+                    help="Like 'myaccount_a1b2' — the folder under xwechat_files/")
     args = ap.parse_args()
 
     attach_dir = Path(args.attach_dir)

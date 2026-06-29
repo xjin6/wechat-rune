@@ -21,8 +21,19 @@ wxid = sys.argv[1]
 index_path = sys.argv[2]
 out_path = sys.argv[3]
 
-keys = json.load(open(r"scripts/keys/wechat_keys.json"))
-db_dir = r"D:/WeChat history/xwechat_files/magicxinjx_c092/db_storage"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+from config import XWECHAT_FILES
+
+keys = json.load(open(os.path.join(_HERE, "keys", "wechat_keys.json"), encoding="utf-8"))
+
+# Auto-detect the account folder (the one holding db_storage) — never hardcode a
+# specific account, so this works for whatever account is logged in.
+_account = next((d for d in os.listdir(XWECHAT_FILES)
+                 if os.path.isdir(os.path.join(XWECHAT_FILES, d, "db_storage"))), None)
+if not _account:
+    sys.exit(f"No account folder with db_storage found under {XWECHAT_FILES}")
+db_dir = os.path.join(XWECHAT_FILES, _account, "db_storage")
 tbl = "Msg_" + hashlib.md5(wxid.encode()).hexdigest()
 
 index = json.load(open(index_path, encoding="utf-8"))
@@ -34,10 +45,15 @@ ORIGSRC_RE = re.compile(r'\boriginsourcemd5="([a-f0-9]*)"')
 out = []
 seen_md5 = set()
 
-for shard in ["message_0.db", "message_1.db"]:
-    db = f"{db_dir}/message/{shard}"
-    rel = f"magicxinjx_c092\\db_storage\\message\\{shard}"
-    key = keys.get(rel)
+# Enumerate whatever message_N.db shards exist; match each key by path suffix
+# (account-folder-agnostic) so no account name is ever hardcoded.
+_msg_dir = os.path.join(db_dir, "message")
+_shards = sorted((f for f in os.listdir(_msg_dir) if re.match(r"message_\d+\.db$", f)),
+                 key=lambda x: int(re.search(r"\d+", x).group()))
+for shard in _shards:
+    db = os.path.join(_msg_dir, shard)
+    key = next((v for k, v in keys.items()
+                if k.replace("\\", "/").endswith(f"message/{shard}")), None)
     if not key:
         continue
     c = _sc.connect(db)
