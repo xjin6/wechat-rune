@@ -44,6 +44,37 @@ ln -s "$PWD/skills/wechat-rune-bot"    ~/.claude/skills/wechat-rune-bot
 - "帮我导出微信聊天记录" → 触发 `wechat-rune-export`
 - "帮我设置微信 AI 自动回复" → 触发 `wechat-rune-bot`
 
+## 用法 —— 适用于任意联系人
+
+脚本里**不写死任何人名或机器路径**。每次运行时你提供联系人(**wxid + 一个简短
+label**)和目录根路径,同一套工具就能处理你指向的任何人。
+
+**密钥。** `scripts/keys/wechat_keys.json` 需要含有"要读取的那个微信账号"的密钥。
+密钥会累积进 `scripts/keys/wechat_keys_pool.json`(**只增不删**),由 `keystore.py`
+自动为每个数据库挑出当前能解密的那个 —— 这样一次残缺的重新抓取也**绝不会覆盖丢掉**
+已有的好密钥。用 `scripts/keys/extract_key_windows.py` 抓取/刷新,或用
+`python scripts/keys/import_keys.py <文件>` 从外部工具的导出里导入。
+
+**一键增量更新(Windows)。** 传入联系人列表 + 路径:
+
+```powershell
+.\update_wechat.ps1 -Contacts "wxid_aaaaaaaaaaaa:alice,wxid_bbbbbbbbbbbb:bob" `
+    -Rel "<relationship 根目录>" -Wiki "<Obsidian wiki 根目录>"
+# -KeyFile <导出文件> 会先导入密钥;-Correct 额外做 AI 同音字纠错。
+```
+
+依次执行:增量诊断 → 转录新语音(续跑)→ 重新导出每个 `<label>_wechat.md` →
+同步一份去图版到 Obsidian wiki。路径也可用环境变量 `WECHAT_VIBE_ROOT` /
+`WECHAT_WIKI_ROOT` 提供(此时 `-Rel/-Wiki` 可省略)。
+
+**单步同样通用:**
+
+```bash
+python scripts/export_chat.py --wxid wxid_aaaaaaaaaaaa --out alice.md
+python scripts/incremental_diff.py "<relationship 根目录>" "wxid_aaaaaaaaaaaa:alice"
+python scripts/sync_to_wiki.py alice --vibe-root <…> --wiki-root <…>
+```
+
 ## 项目结构
 
 ```
@@ -58,14 +89,19 @@ wechat-rune/
 ├── scripts/                    # 两个 skill 共享的代码
 │   ├── keys/
 │   │   ├── extract_key_macos.c      # Mac：编译一次，sudo 运行
-│   │   └── extract_key_windows.py   # Windows：Python + ctypes
+│   │   ├── extract_key_windows.py   # Windows：Python + ctypes
+│   │   ├── keystore.py              # 只增不删的多候选密钥库
+│   │   └── import_keys.py           # 从任意外部导出导入并校验密钥
 │   ├── export_chat.py
+│   ├── incremental_diff.py          # 各联系人增量诊断
+│   ├── sync_to_wiki.py              # 去图同步到 Obsidian 库
 │   ├── transcribe_voices.py
 │   ├── start.py                     # bot 启动器
 │   ├── bot.py                       # bot 主循环
 │   ├── dashboard.py                 # 实时 web 面板
 │   ├── config.py
 │   └── core/                        # RAG、向量检索、发送器、解密、联系人
+├── update_wechat.ps1                # Windows 一键增量更新脚本
 ├── requirements.txt
 ├── README.md
 └── README_CN.md                     # 本文件

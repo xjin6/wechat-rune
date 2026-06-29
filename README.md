@@ -46,6 +46,40 @@ Relaunch Claude Code. Then:
 - "Export my WeChat chat history" → triggers `wechat-rune-export`
 - "Set up a WeChat auto-reply bot" → triggers `wechat-rune-bot`
 
+## Usage — works for any contact
+
+Nothing is pinned to specific people or machine paths. You name the contacts
+(by **wxid + a short label**) and the folder roots on each run, so the same tools
+update whoever you point them at.
+
+**Keys.** `scripts/keys/wechat_keys.json` must hold the keys for the WeChat account
+whose data you're reading. Keys accumulate in `scripts/keys/wechat_keys_pool.json`
+(append-only) and `keystore.py` re-resolves the one working key per database — so a
+partial re-scan can never wipe good keys. Capture/refresh with
+`scripts/keys/extract_key_windows.py`, or import an external dump with
+`python scripts/keys/import_keys.py <file>`.
+
+**One-click incremental update (Windows).** Pass the contact list + roots:
+
+```powershell
+.\update_wechat.ps1 -Contacts "wxid_aaaaaaaaaaaa:alice,wxid_bbbbbbbbbbbb:bob" `
+    -Rel "<relationship root>" -Wiki "<obsidian wiki root>"
+# -KeyFile <dump> imports keys first; -Correct adds AI homophone correction.
+```
+
+It runs: incremental diff → transcribe new voices (resume) → re-export each
+`<label>_wechat.md` → sync an image-less copy to the Obsidian wiki. Roots can also
+come from env vars `WECHAT_VIBE_ROOT` / `WECHAT_WIKI_ROOT` (then `-Rel/-Wiki` are
+optional).
+
+**Individual steps** are equally generic:
+
+```bash
+python scripts/export_chat.py --wxid wxid_aaaaaaaaaaaa --out alice.md
+python scripts/incremental_diff.py "<relationship root>" "wxid_aaaaaaaaaaaa:alice"
+python scripts/sync_to_wiki.py alice --vibe-root <…> --wiki-root <…>
+```
+
 ## Repository layout
 
 ```
@@ -60,14 +94,19 @@ wechat-rune/
 ├── scripts/                   # shared code used by both skills
 │   ├── keys/
 │   │   ├── extract_key_macos.c     # Mac: compile once, run with sudo
-│   │   └── extract_key_windows.py  # Windows: Python + ctypes
+│   │   ├── extract_key_windows.py  # Windows: Python + ctypes
+│   │   ├── keystore.py             # append-only, multi-candidate key store
+│   │   └── import_keys.py          # import + validate keys from any external dump
 │   ├── export_chat.py
+│   ├── incremental_diff.py         # per-contact delta diagnostic
+│   ├── sync_to_wiki.py             # image-less sync to an Obsidian vault
 │   ├── transcribe_voices.py
 │   ├── start.py                    # bot launcher
 │   ├── bot.py                      # bot main loop
 │   ├── dashboard.py                # live web dashboard
 │   ├── config.py
 │   └── core/                       # RAG, embeddings, sender, decrypt, contacts
+├── update_wechat.ps1               # Windows one-click incremental-update runner
 ├── requirements.txt
 ├── README.md                       # this file
 └── README_CN.md                    # 中文版
