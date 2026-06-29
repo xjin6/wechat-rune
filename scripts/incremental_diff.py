@@ -172,9 +172,28 @@ def report(label: str, wxid: str, rel_root: str, keys: dict, db_dir: str, attach
     src_dir = os.path.join(attach_root, contact_md5)
     # images/ stays alongside the .md (not in archive) so md image refs work as-is
     out_dir = os.path.join(rel_root, label, "images")
-    n_src = sum(len(fs) for _, _, fs in os.walk(src_dir)) if os.path.isdir(src_dir) else 0
-    n_out = sum(len(fs) for _, _, fs in os.walk(out_dir)) if os.path.isdir(out_dir) else 0
-    print(f"  attach .dat files: {n_src} | decrypted: {n_out} | new to decrypt: {max(0, n_src - n_out)}")
+    # A .dat is "decrypted" iff an output with the SAME relative stem exists (decrypt
+    # keeps <YYYY-MM>/Img/<id> and only swaps .dat -> image ext). Counting raw file
+    # TOTALS is wrong: one source yields several outputs, so totals report "0 new" even
+    # when fresh .dat are undecrypted — that false 0 once hid a brand-new image. Compare
+    # by stem instead. (Still: decrypt_images.py is idempotent and cheap — just run it.)
+    out_stems = set()
+    n_out = 0
+    if os.path.isdir(out_dir):
+        for r, _, fs in os.walk(out_dir):
+            for f in fs:
+                n_out += 1
+                out_stems.add(os.path.splitext(os.path.relpath(os.path.join(r, f), out_dir))[0])
+    n_src = n_new = 0
+    if os.path.isdir(src_dir):
+        for r, _, fs in os.walk(src_dir):
+            for f in fs:
+                if not f.lower().endswith(".dat"):
+                    continue
+                n_src += 1
+                if os.path.splitext(os.path.relpath(os.path.join(r, f), src_dir))[0] not in out_stems:
+                    n_new += 1
+    print(f"  attach .dat files: {n_src} | decrypted: {n_out} | new to decrypt: {n_new}")
 
 
 def main():

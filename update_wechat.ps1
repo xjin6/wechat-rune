@@ -57,6 +57,29 @@ python scripts/keys/keystore.py show
 # (keystore re-resolves wechat_keys.json from the pool; incremental_diff below will
 #  surface any DB it still can't read as `DB messages: 0`.)
 
+# ── 2.5 harvest manual edits from the Wiki .md back into the JSON sources ──
+# You read/edit the image-less Wiki .md in Obsidian. Both .md files are regenerated
+# every run, so we FIRST pull your hand-edited descriptions/transcripts back into
+# image_descriptions.json / voice_map.json (matched via anchors from a fresh baseline;
+# anything ambiguous is reported, never auto-applied). Run BEFORE any JSON mutation.
+foreach ($c in $ContactList) {
+    $wikiMd = Join-Path $Wiki "$($c.Label)\$($c.Label)_wechat.md"
+    if (-not (Test-Path $wikiMd)) { continue }
+    Step "2.5-$($c.Label)" "Harvest manual edits from Wiki md"
+    $arch  = Join-Path $Rel "$($c.Label)\$($c.Label)_archive"
+    $descs = Join-Path $arch "image_descriptions.json"
+    $vmap  = Join-Path $arch "$($c.Label)_voice_map.json"
+    $idx   = Join-Path $arch "image_index.json"
+    $baseMd = Join-Path $env:TEMP "_harvest_base_$($c.Label).md"
+    $baseAnch = Join-Path $env:TEMP "_harvest_anch_$($c.Label).json"
+    python scripts/export_chat.py --wxid $c.Wxid --out $baseMd `
+        --voice-json $vmap --image-index $idx --image-descriptions $descs --emit-anchors $baseAnch
+    python scripts/harvest_edits.py --user-wiki $wikiMd --baseline-vibe $baseMd `
+        --anchors $baseAnch --image-descriptions $descs --voice-map $vmap `
+        --manual-registry (Join-Path $arch "manual_edits.json") --apply
+    Remove-Item $baseMd, $baseAnch -ErrorAction SilentlyContinue
+}
+
 # ── 3. incremental diff ─────────────────────────────────────────────
 Step 3 "Incremental diff"
 $diffArgs = @("scripts/incremental_diff.py", "$Rel")

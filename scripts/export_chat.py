@@ -337,31 +337,35 @@ def format_msg(hex_str: str, local_type: int, voice_map: dict = None, ts: int = 
                is_me: bool = False):
     text = _decode_raw(hex_str)
     is_system = False
+    # Anchor for harvest-back: ("img", md5) / ("voice", str(ts)) for editable lines,
+    # else None. Read by export_chat right after this call (render order preserved).
+    format_msg.anchor = None
 
     if local_type == 1:
         if not text or text.startswith("<"):
             return None, False
         return text, False
     elif local_type == 3:
-        if image_map:
-            m = _IMG_MD5_RE.search(text or "")
-            if m:
-                entry = image_map.get("by_orig_md5", {}).get(m.group(1))
-                if entry:
-                    thumb = entry.get("thumb")
-                    osrc = _IMG_ORIGSRC_RE.search(text or "")
-                    is_animated = bool(osrc and not osrc.group(1))
-                    kind = "动图" if is_animated else "图片"
-                    desc = (image_map.get("descriptions") or {}).get(m.group(1), "")
-                    tag = f"[{kind}: {desc}]" if desc else f"[{kind}]"
-                    if thumb:
-                        # Image on its own line, description underneath — keeps
-                        # the thumbnail and its (often long) description from
-                        # crowding onto the same line.
-                        return f"![](images/{thumb})\n{tag}", False
-                    return tag, False
+        m = _IMG_MD5_RE.search(text or "")
+        format_msg.anchor = ("img", m.group(1) if m else None)
+        if image_map and m:
+            entry = image_map.get("by_orig_md5", {}).get(m.group(1))
+            if entry:
+                thumb = entry.get("thumb")
+                osrc = _IMG_ORIGSRC_RE.search(text or "")
+                is_animated = bool(osrc and not osrc.group(1))
+                kind = "动图" if is_animated else "图片"
+                desc = (image_map.get("descriptions") or {}).get(m.group(1), "")
+                tag = f"[{kind}: {desc}]" if desc else f"[{kind}]"
+                if thumb:
+                    # Image on its own line, description underneath — keeps
+                    # the thumbnail and its (often long) description from
+                    # crowding onto the same line.
+                    return f"![](images/{thumb})\n{tag}", False
+                return tag, False
         return "[图片]", False
     elif local_type == 34:
+        format_msg.anchor = ("voice", str(ts)) if ts is not None else None
         root = _parse_xml(text)
         vlen = _attr_anywhere(root, "voicelength") if root is not None else ""
         secs = None
@@ -536,7 +540,8 @@ def _build_nick_map(keys_file: str, db_dir: str, my_wxid: str) -> dict:
 # ── Core export ───────────────────────────────────────────────────
 
 def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
-                out_path: str, voice_map: dict = None, image_map: dict = None):
+                out_path: str, voice_map: dict = None, image_map: dict = None,
+                anchors_path: str = None):
     keys  = json.load(open(keys_file))
     table = "Msg_" + hashlib.md5(wxid.encode()).hexdigest()
 
@@ -604,7 +609,8 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
                     continue
                 seen.add(svr_id)
                 is_me = None if is_system else is_me_flag
-                all_msgs.append((ts, is_me, text))
+                anchor = getattr(format_msg, "anchor", None)
+                all_msgs.append((ts, is_me, text, anchor))
             except Exception:
                 pass
 
@@ -617,7 +623,8 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
     lines = [f"# 与{display_name}的微信聊天记录\n",
              f"共 {len(all_msgs)} 条消息\n\n---\n"]
     current_date = None
-    for ts, is_me, text in all_msgs:
+    emitted_anchors = []   # ordered {type,key} for each image/voice line, render order
+    for ts, is_me, text, anchor in all_msgs:
         dt       = datetime.datetime.fromtimestamp(ts)
         date_str = dt.strftime("%Y-%m-%d")
         time_str = dt.strftime("%H:%M")
@@ -629,11 +636,17 @@ def export_chat(wxid: str, display_name: str, keys_file: str, db_dir: str,
         else:
             sender = nick_map.get(my_wxid, "我") if is_me else display_name
             lines.append(f"**{time_str} {sender}**\n{text}\n")
+        if anchor:
+            emitted_anchors.append({"type": anchor[0], "key": anchor[1]})
 
     content = "\n".join(lines)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(content)
     print(f"Exported {len(all_msgs)} messages -> {out_path} ({os.path.getsize(out_path)//1024} KB)")
+    if anchors_path:
+        with open(anchors_path, "w", encoding="utf-8") as f:
+            json.dump(emitted_anchors, f, ensure_ascii=False)
+        print(f"Wrote {len(emitted_anchors)} anchors -> {anchors_path}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────
@@ -647,6 +660,8 @@ def main():
     parser.add_argument("--voice-json", help="Voice transcription JSON")
     parser.add_argument("--image-index", help="image_index.json built by build_image_index.py")
     parser.add_argument("--image-descriptions", help="image_descriptions.json (md5 -> Chinese description)")
+    parser.add_argument("--emit-anchors", help="write ordered {type,key} per image/voice line "
+                                               "to this path (for harvest-back of manual edits)")
     args = parser.parse_args()
 
     if not args.name and not args.wxid:
@@ -705,7 +720,8 @@ def main():
             print(f"Loaded image descriptions: {len(image_map['descriptions'])} entries")
 
     export_chat(target_wxid, display_name, keys_file, db_dir, out_path,
-                voice_map=voice_map, image_map=image_map)
+                voice_map=voice_map, image_map=image_map,
+                anchors_path=os.path.expanduser(args.emit_anchors) if args.emit_anchors else None)
 
 
 if __name__ == "__main__":

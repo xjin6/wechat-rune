@@ -445,6 +445,38 @@ folder itself stays clean; `images/` stays alongside the `.md` so the embedded
 `incremental_diff.py` also accepts the legacy flat layout (cache JSONs directly
 under `<label>/`) as a fallback, so un-migrated contacts keep working.
 
+### 5·0. Harvest manual Wiki edits FIRST (before regenerating anything)
+
+The user reads/edits the **image-less Wiki `.md`** in Obsidian — including image
+descriptions (`[图片: …]`) and voice transcripts (`[语音 Ns] …`). Both `.md` files are
+fully regenerated every update, so those hand-edits would be lost. So **before any
+re-export**, pull them back into the JSON sources:
+
+```bash
+# 1) render a fresh baseline from the CURRENT JSON, emitting per-line anchors
+python scripts/export_chat.py --wxid <wxid> --out /tmp/base.md \
+  --voice-json <archive>/<label>_voice_map.json --image-index <archive>/image_index.json \
+  --image-descriptions <archive>/image_descriptions.json --emit-anchors /tmp/base.anchors.json
+# 2) harvest the user's Wiki-md edits back into the JSON (dry-run first to read the report)
+python scripts/harvest_edits.py --user-wiki <wiki>/<label>/<label>_wechat.md \
+  --baseline-vibe /tmp/base.md --anchors /tmp/base.anchors.json \
+  --image-descriptions <archive>/image_descriptions.json \
+  --voice-map <archive>/<label>_voice_map.json \
+  --manual-registry <archive>/manual_edits.json --apply
+```
+
+How it stays safe: the baseline carries an ordered anchor (md5 / voice-ts per
+image/voice line); `harvest_edits.py` aligns the user's Wiki md to the baseline with
+difflib — the bulk of unedited messages match exactly and anchor the alignment, new
+records show as inserts, an edit shows as a clean 1:1 line replace. **Only clean 1:1
+replaces are applied; anything ambiguous (block-length mismatch, type mismatch, anchor
+desync) is reported, never auto-applied** — so it never silently mis-assigns; worst
+case it asks you. Harvested keys are flagged manual (voice in-band `"manual": true`;
+images in `manual_edits.json`), and the incremental describe/correct only touch
+net-new keys, so harvested edits are never re-overwritten. (`update_wechat.ps1` runs
+this as step 2.5 automatically.) Only image descriptions (→md5) and voice transcripts
+(→ts) are harvestable; edits to message body text can't be (no editable source).
+
 ### 5a. Before re-extracting keys: open every chat
 
 Critical: **open Weixin and click into every contact you'll update before key
@@ -506,6 +538,12 @@ correction has ~5–15% false-positive rate without it.
 
 ### 5e. Images: decrypt, rebuild, diff descriptions
 
+> 🛑 **ALWAYS run `decrypt_images.py` every update — never skip it based on the diff's
+> "new to decrypt" count.** It is idempotent and cheap (~1–2 min). The diff number is a
+> hint, not a gate: it once read `0` while a brand-new image sat undecrypted, and that
+> image shipped as a bare `[图片]`. Run the FULL image pipeline (decrypt → build_image_index
+> → build_describe_list → diff net-new) on every incremental update, unconditionally.
+
 `decrypt_images.py` is idempotent — re-running over the same out-dir processes
 new `.dat` files only:
 
@@ -538,6 +576,17 @@ The export is fast (5–30 sec) and uses whichever JSON files you've updated.
 Final message counts may not equal "old + new" — phone re-imports can cause
 message renumbering or trim old archived messages. That's expected; don't try
 to reconcile.
+
+> ✅ **Post-export sanity check — catch images you missed.** A described image renders
+> `[图片: …]`; an un-described one renders a bare `[图片]`. After re-exporting, scan the
+> NEW date range for bare images:
+> ```bash
+> grep -nE "^\[图片\]$" <output.md> | tail   # then check the dates of any hits
+> ```
+> A bare `[图片]` on a **recent** date = an image the pipeline missed → re-run 5e
+> (decrypt → index → describe) and re-export. (Bare `[图片]` on OLD dates is usually
+> the ~70% coverage limit — Weixin auto-cleaned the original off disk, leaving only a
+> thumbnail whose md5 ≠ the XML md5 — and is unrecoverable, not a bug.)
 
 ---
 
